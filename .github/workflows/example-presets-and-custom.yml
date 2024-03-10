@@ -1,0 +1,42 @@
+name: Super Action Example (Presets and Custom)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run_combined_steps:
+    runs-on: ubuntu-latest
+    steps:
+      # No explicit checkout needed if using a preset that includes it
+
+      - name: Run Presets and Custom Actions with super-action
+        id: super_run
+        uses: ./ # Or uses: resoft-labs/super-action@v1
+        with:
+          # Define presets to run first
+          presets: |
+            - node-setup-install # Includes checkout, node setup, npm install
+
+          # Define custom actions to run after the preset
+          action_list: |
+            - name: Run Build
+              run: npm run build # Assumes npm install was done by the preset
+            - name: Run Tests
+              run: npm test # Assumes npm install was done by the preset
+            - name: Another Custom Step
+              run: echo "Finished build and test."
+
+          # Save results to a file
+          results_output_file: outputs/combined_results.json
+
+      # Results are automatically logged by super-action.
+      # Upload the results file as an artifact.
+      - name: Upload Combined Results Artifact
+        if: always() # Run even if previous steps fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-run-results
+          path: outputs/combined_results.json
+          if-no-files-found: warn # Don't fail if the file wasn't created

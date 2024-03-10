@@ -1,0 +1,51 @@
+name: 'super-action'
+description: 'Runs a sequence of specified GitHub Actions with their parameters and collects their results.'
+author: 'Faruk Diblen - ReSoft Labs <info@resoftlabs.com>'
+
+# Environment variables for inputs are automatically created by the runner
+# e.g., INPUT_PRESETS, INPUT_ACTION_LIST, INPUT_RESULTS_OUTPUT_FILE, INPUT_RUNNER_OS
+
+inputs:
+# Note: At least one of 'presets' or 'action_list' must be provided.
+  presets:
+    description: >
+      Optional. A YAML sequence (list) of predefined action preset names to run.
+      Presets are run in the order specified, before any custom actions.
+      Available presets are defined in the action's documentation.
+      Example: |
+        - checkout
+        - setup-node-20
+    required: false
+  action_list:
+    description: >
+      Optional. YAML string representing a sequence (array) of custom actions to run.
+      These run after any specified presets.
+      Each item should have `uses` and optionally `with`.
+      Use YAML block scalar syntax (`|` or `>`).
+      Example: |
+        - uses: actions/checkout@v4
+        - uses: actions/setup-node@v3
+          with:
+            node-version: 18
+    required: false
+  results_output_file:
+    description: >
+      Optional. Path relative to the workspace root where the results JSON should be saved.
+      Example: 'super_action_results.json' or 'outputs/results.json'.
+      If provided, the action will write the results to this file.
+    required: false
+  runner_os:
+    description: 'The OS for the runner (e.g., ubuntu-latest, windows-latest, macos-latest).'
+    required: false
+    default: 'ubuntu-latest'
+
+outputs:
+  results:
+    description: >
+      A JSON string containing the results (outputs, outcome) of each executed step,
+      as captured by the final step in the dynamically generated workflow run by 'act'.
+      The structure matches the 'steps' context object.
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'

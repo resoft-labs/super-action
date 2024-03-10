@@ -1,0 +1,35 @@
+name: Super Action Example
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  run_dynamic_steps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Multiple Actions with super-action
+        id: super_run
+        # Use the local super-action (assuming the workflow is in the same repo as the action)
+        # Replace './' with 'resoft-labs/super-action@v1' if using a published action
+        uses: ./
+        with:
+          presets: |
+            - node-setup-install
+          action_list: |
+            - name: Run Build
+              run: npm run build
+            - name: Run Tests
+              run: npm test
+          results_output_file: outputs/node_build_test_results.json
+
+      - name: Upload Node Build & Test Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-build-test-results
+          path: outputs/node_build_test_results.json
+          if-no-files-found: warn

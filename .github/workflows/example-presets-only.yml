@@ -1,0 +1,33 @@
+name: Super Action Example (Presets Only)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run_preset_steps:
+    runs-on: ubuntu-latest
+    steps:
+      # No explicit checkout needed if using a preset that includes it
+
+      - name: Run Presets with super-action
+        id: super_run
+        uses: ./ # Or uses: resoft-labs/super-action@v1
+        with:
+          # Define presets to run
+          presets: |
+            - node-setup-install # Includes checkout, node setup, npm install
+
+          # Optionally save results
+          # results_output_file: outputs/presets_only_results.json
+
+      # Results are automatically logged by super-action
+      # Optionally upload artifact if results_output_file was used
+      # - name: Upload Presets Only Results Artifact
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: presets-only-results
+      #     path: outputs/presets_only_results.json
+      #     if-no-files-found: warn
