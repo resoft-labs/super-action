@@ -15,7 +15,7 @@ jobs:
         id: super_run
         # Use the local super-action (assuming the workflow is in the same repo as the action)
         # Replace './' with 'resoft-labs/super-action@v1' if using a published action
-        uses: ./
+        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
         with:
           presets: |
             - node-setup-install

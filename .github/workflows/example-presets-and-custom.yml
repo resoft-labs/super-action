@@ -13,7 +13,7 @@ jobs:
 
       - name: Run Presets and Custom Actions with super-action
         id: super_run
-        uses: ./ # Or uses: resoft-labs/super-action@v1
+        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
         with:
           # Define presets to run first
           presets: |
