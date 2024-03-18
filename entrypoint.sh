@@ -170,7 +170,7 @@ echo "::group::Running act..."
 # Use --bind to mount the workspace if actions need access to checked-out code.
 # Use --secret-file if secrets are needed (requires careful handling).
 # The '--output' flag in act is complex; writing to a file from within the workflow is more reliable here.
-act push --workflows "$TEMP_WORKFLOW_PATH" --job dynamic_job --bind --directory "$GITHUB_WORKSPACE" --container-architecture linux/amd64
+act push --action-offline-mode --workflows "$TEMP_WORKFLOW_PATH" --job dynamic_job --bind --directory "$GITHUB_WORKSPACE" --container-architecture linux/amd64
 # Consider adding error handling for 'act' execution itself
 echo "::endgroup::"
 

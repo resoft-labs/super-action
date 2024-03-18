@@ -1,4 +1,4 @@
-name: Super Action Example (Presets Only)
+name: presets only
 
 on:
   push:

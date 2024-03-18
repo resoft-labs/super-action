@@ -1,4 +1,4 @@
-name: Super Action Example (Custom Actions Only)
+name: custom Actions Only
 
 on:
   push:
