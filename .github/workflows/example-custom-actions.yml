@@ -1,4 +1,4 @@
-name: custom Actions Only
+name: custom actions Only
 
 on:
   push:
