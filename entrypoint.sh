@@ -115,7 +115,8 @@ for i in $(seq 0 $((count - 1))); do
     # Add 'with' parameters if they exist
     if yq -e ".[$i].with | type == \"!!map\" and length > 0" "$MERGED_ACTIONS_YAML_FILE" > /dev/null; then
       echo "        with:" >> "$TEMP_WORKFLOW_PATH"
-      yq ".[$i].with | .. style = \"\"" "$MERGED_ACTIONS_YAML_FILE" | sed 's/^/          /' >> "$TEMP_WORKFLOW_PATH"
+      # Let yq handle quoting by default, remove explicit style removal
+      yq ".[$i].with" "$MERGED_ACTIONS_YAML_FILE" | sed 's/^/          /' >> "$TEMP_WORKFLOW_PATH"
     fi
 
   elif [ -n "$action_run" ]; then
@@ -156,7 +157,8 @@ cat << EOF >> "$TEMP_WORKFLOW_PATH"
         shell: bash
         run: |
           echo "Writing results to ${RESULTS_FILE}..."
-          echo \${{ toJSON(steps) }} > "${RESULTS_FILE}"
+          # Use printf to safely write JSON content to the file
+          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
           echo "Results written."
 EOF
 
