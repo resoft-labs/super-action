@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # No explicit checkout needed if using a preset that includes it
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Run Presets and Custom Actions with super-action
         id: super_run
