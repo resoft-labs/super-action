@@ -38,6 +38,10 @@ inputs:
     description: 'The OS for the runner (e.g., ubuntu-latest, windows-latest, macos-latest).'
     required: false
     default: 'ubuntu-latest'
+  display_results:
+    description: 'Whether to display the collected results JSON in the action logs.'
+    required: false
+    default: 'true' # Input is treated as a string 'true' or 'false'
 
 outputs:
   results:

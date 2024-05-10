@@ -1,4 +1,4 @@
-name: custom actions Only
+name: custom actions only
 
 on:
   push:
@@ -30,7 +30,10 @@ jobs:
           # Optionally save results
           # results_output_file: outputs/custom_actions_results.json
 
-      # Results are automatically logged by super-action
+          # Optionally disable results logging (default is true)
+          display_results: "false"
+
+      # Results are automatically logged by super-action (unless disabled)
       # Optionally upload artifact if results_output_file was used
       # - name: Upload Custom Actions Results Artifact
       #   if: always()

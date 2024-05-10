@@ -194,11 +194,17 @@ echo "results<<EOF" >> "$GITHUB_OUTPUT"
 echo "$RESULTS_JSON" >> "$GITHUB_OUTPUT"
 echo "EOF" >> "$GITHUB_OUTPUT"
 
-# Display Results in Log
-echo "::group::Super-Action Collected Results (JSON)"
-# Use jq to pretty-print the JSON to the log
-echo "$RESULTS_JSON" | jq '.' || echo "$RESULTS_JSON" # Fallback to raw echo if jq fails
-echo "::endgroup::"
+# Display Results in Log (Conditional)
+# Default to true if the input is not provided or empty
+DISPLAY_RESULTS="${INPUT_DISPLAY_RESULTS:-true}"
+if [ "$DISPLAY_RESULTS" = "true" ]; then
+  echo "::group::Super-Action Collected Results (JSON)"
+  # Use jq to pretty-print the JSON to the log
+  echo "$RESULTS_JSON" | jq '.' || echo "$RESULTS_JSON" # Fallback to raw echo if jq fails
+  echo "::endgroup::"
+else
+  echo "::debug::Result display is disabled by the 'display_results' input."
+fi
 
 # Save Results to File (Optional)
 if [ -n "$INPUT_RESULTS_OUTPUT_FILE" ]; then
