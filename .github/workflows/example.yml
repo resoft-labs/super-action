@@ -25,6 +25,8 @@ jobs:
             - name: Run Tests
               run: npm test
           results_output_file: outputs/node_build_test_results.json
+          # Explicitly enable results logging (this is the default)
+          display_results: "true"
 
       - name: Upload Node Build & Test Results Artifact
         if: always()
