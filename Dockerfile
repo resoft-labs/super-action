@@ -2,11 +2,6 @@ FROM catthehacker/ubuntu:act-24.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl \
-    jq \
-    git \
-    ca-certificates \
-    wget \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 

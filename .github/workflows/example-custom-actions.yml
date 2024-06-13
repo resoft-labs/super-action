@@ -23,22 +23,22 @@ jobs:
               run: echo "Running a custom echo command."
             - uses: actions/setup-python@v5
               with:
-                python-version: '3.11'
+                python-version: '3.12'
             - name: Show Python Version
               run: python --version
 
           # Optionally save results
-          # results_output_file: outputs/custom_actions_results.json
+          results_output_file: outputs/custom_actions_results.json
 
           # Optionally disable results logging (default is true)
-          display_results: "false"
+          display_results: "true"
 
       # Results are automatically logged by super-action (unless disabled)
       # Optionally upload artifact if results_output_file was used
-      # - name: Upload Custom Actions Results Artifact
-      #   if: always()
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: custom-actions-results
-      #     path: outputs/custom_actions_results.json
-      #     if-no-files-found: warn
+      - name: Upload Custom Actions Results Artifact
+        #   if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-actions-results
+          path: outputs/custom_actions_results.json
+          if-no-files-found: warn
