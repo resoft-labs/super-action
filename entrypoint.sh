@@ -177,14 +177,62 @@ act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job d
 echo "::endgroup::"
 
 # Process the run results
-if [ -f "$RESULTS_FILE" ]; then
-  echo "::debug::Reading results from ${RESULTS_FILE}"
-  RESULTS_JSON=$(cat "$RESULTS_FILE")
-  # Optional: Further process or filter RESULTS_JSON if needed
+if [ -f "$RESULTS_FILE" ] && [ -f "$MERGED_ACTIONS_YAML_FILE" ]; then
+  echo "::debug::Reading results from ${RESULTS_FILE} and original actions from ${MERGED_ACTIONS_YAML_FILE}"
+  # Read raw results (steps context)
+  RAW_RESULTS_JSON=$(cat "$RESULTS_FILE")
+  # Convert original actions YAML to JSON array
+  ORIGINAL_ACTIONS_JSON=$(yq -o=json '.' "$MERGED_ACTIONS_YAML_FILE")
+
+  # Use jq to merge original action names into the results
+  # 1. Create a map of original actions keyed by their generated ID
+  # 2. Iterate through the raw results (steps context)
+  # 3. For each step in raw results, find the matching original action by ID
+  # 4. Merge the step result with the original action object
+  # 5. Select desired fields (id, name, outcome, outputs) for the final output
+  ENHANCED_RESULTS_JSON=$(jq -n --argjson rawResults "$RAW_RESULTS_JSON" --argjson originalActions "$ORIGINAL_ACTIONS_JSON" '
+    # Create a map: { "generated_id": { original_action_object } }
+    ($originalActions | map(
+      . as $action |
+      ($action.uses // "" | if . != "" then "action_\(input_filename | split("/")[-1] | tonumber)_\(. | split("@")[0] | gsub("/"; "-"))" else "action_\(input_filename | split("/")[-1] | tonumber)_run" end) as $id | # Reconstruct the ID logic
+      { ($id): $action }
+    ) | add) as $originalMap
+    |
+    # Iterate through raw results (steps context map)
+    $rawResults | to_entries | map(
+      .key as $stepId | .value as $stepResult |
+      # Find original action, default name if not found (e.g., for setup/cleanup steps)
+      ($originalMap[$stepId] // {name: $stepId}) as $originalAction |
+      # Merge and select fields
+      {
+        id: $stepId,
+        name: $originalAction.name,
+        outcome: $stepResult.outcome,
+        outputs: $stepResult.outputs
+      }
+    )
+  ')
+
+  # Check if jq command succeeded
+  if [ $? -eq 0 ] && [ -n "$ENHANCED_RESULTS_JSON" ]; then
+      RESULTS_JSON="$ENHANCED_RESULTS_JSON"
+      echo "::debug::Successfully merged action names into results."
+  else
+      echo "::warning::Failed to merge action names into results using jq. Falling back to raw results."
+      RESULTS_JSON="$RAW_RESULTS_JSON"
+  fi
+
 else
-  echo "::warning::Results file ${RESULTS_FILE} not found after act execution. Setting empty results."
-  RESULTS_JSON="{}"
+  if [ ! -f "$RESULTS_FILE" ]; then
+      echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
+  fi
+  if [ ! -f "$MERGED_ACTIONS_YAML_FILE" ]; then
+      echo "::warning::Original actions file ${MERGED_ACTIONS_YAML_FILE} not found."
+  fi
+  echo "::warning::Setting empty results due to missing files."
+  RESULTS_JSON="[]" # Use empty array for consistency
 fi
+
 
 # Set Action Output
 echo "::debug::Setting action output 'results'"
@@ -199,8 +247,8 @@ echo "EOF" >> "$GITHUB_OUTPUT"
 DISPLAY_RESULTS="${INPUT_DISPLAY_RESULTS:-true}"
 if [ "$DISPLAY_RESULTS" = "true" ]; then
   echo "::group::Super-Action Collected Results (JSON)"
-  # Use jq to pretty-print the JSON to the log
-  echo "$RESULTS_JSON" | jq '.' || echo "$RESULTS_JSON" # Fallback to raw echo if jq fails
+  # Use jq to pretty-print the JSON to the log (already processed)
+  echo "$RESULTS_JSON" | jq '.' || echo "$RESULTS_JSON" # Fallback to raw echo if jq fails or results are not JSON
   echo "::endgroup::"
 else
   echo "::debug::Result display is disabled by the 'display_results' input."
@@ -219,6 +267,7 @@ if [ -n "$INPUT_RESULTS_OUTPUT_FILE" ]; then
   echo "::debug::Saving results to file: ${output_filepath}"
   # Create directory if it doesn't exist
   mkdir -p "$(dirname "$output_filepath")"
+  # Save the potentially enhanced JSON
   echo "$RESULTS_JSON" > "$output_filepath"
   echo "Results saved to ${INPUT_RESULTS_OUTPUT_FILE}"
 fi
