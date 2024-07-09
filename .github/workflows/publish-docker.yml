@@ -1,11 +1,11 @@
 name: Publish Docker image
 
 on:
-  #   push:
-  #     branches: ["main"] # Trigger on pushes to the main branch
+  push:
+    branches: ["main"] # Trigger on pushes to the main branch
   # Optionally trigger on release creation
-  release:
-    types: [published]
+  # release:
+  #   types: [published]
 
 permissions:
   contents: read
