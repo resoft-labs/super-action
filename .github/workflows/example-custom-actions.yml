@@ -15,7 +15,9 @@ jobs:
 
       - name: Run Custom Actions with super-action
         id: super_run
-        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
+        # Use the pre-built Docker image from GHCR
+        # Replace ':main' with ':latest' or a specific version tag if needed
+        uses: docker://ghcr.io/resoft-labs/super-action:main
         with:
           # Define custom actions to run
           action_list: |

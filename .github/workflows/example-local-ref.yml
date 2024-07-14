@@ -1,0 +1,40 @@
+name: super action example (local reference)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # Allow manual trigger for testing
+
+jobs:
+  run_dynamic_steps_local:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Multiple Actions with super-action (Local Ref)
+        id: super_run
+        # Use the action from the local repository path.
+        # This is useful for testing changes to the action itself before publishing.
+        # It will build the Dockerfile defined in the action's root directory.
+        # Replace 'resoft-labs/super-action@main' with './' if running in the same repo.
+        uses: resoft-labs/super-action@main
+        with:
+          presets: |
+            - node-setup-install
+          action_list: |
+            - name: Run Build
+              run: npm run build
+            - name: Run Tests
+              run: npm test
+          results_output_file: outputs/local_ref_results.json
+          # Explicitly enable results logging (this is the default)
+          display_results: "true"
+
+      - name: Upload Local Ref Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-ref-results
+          path: outputs/local_ref_results.json
+          if-no-files-found: warn

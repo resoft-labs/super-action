@@ -13,9 +13,9 @@ jobs:
 
       - name: Run Multiple Actions with super-action
         id: super_run
-        # Use the local super-action (assuming the workflow is in the same repo as the action)
-        # Replace './' with 'resoft-labs/super-action@v1' if using a published action
-        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
+        # Use the pre-built Docker image from GHCR
+        # Replace ':main' with ':latest' or a specific version tag if needed
+        uses: docker://ghcr.io/resoft-labs/super-action:main
         with:
           presets: |
             - node-setup-install

@@ -135,6 +135,9 @@ See the following example workflow files in the `.github/workflows/` directory f
     *   Demonstrates using both `presets` and `action_list` together.
     *   Shows how to save the results to a file using `results_output_file` and upload it as an artifact using `actions/upload-artifact`.
 
+4.  **Local Reference:** `.github/workflows/example-local-ref.yml`
+    *   Demonstrates using the action via a local path reference (`uses: resoft-labs/super-action@main` or `uses: ./`), which builds the local `Dockerfile`. Useful for testing changes to the action itself.
+
 ## Local Testing with act
 
 You can test this action locally using `nektos/act` if you have Docker and `act` installed on your machine.

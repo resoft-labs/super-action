@@ -9,6 +9,7 @@ DEFAULT_RUNNER_OS="ubuntu-latest"
 ACTION_LIST_FILE="/tmp/input_action_list.yaml"
 PRESETS_YAML_FILE="/tmp/input_presets.yaml"
 MERGED_ACTIONS_YAML_FILE="/tmp/merged_actions.yaml"
+ID_NAME_MAP_FILE="/tmp/id_name_map.json" # File to store ID -> Name mapping
 PRESETS_DIR="/presets"
 
 # Input Validation
@@ -85,7 +86,8 @@ echo "::debug::Generating temporary workflow file at ${TEMP_WORKFLOW_PATH}"
 # Use provided runner_os or default
 RUNNER_OS="${INPUT_RUNNER_OS:-$DEFAULT_RUNNER_OS}"
 
-# Start workflow structure
+# Start workflow structure and ID->Name map
+echo "{}" > "$ID_NAME_MAP_FILE" # Initialize map file
 cat << EOF > "$TEMP_WORKFLOW_PATH"
 name: Dynamic Workflow Execution
 on: push # 'act' requires an event, 'push' is common for local testing
@@ -106,9 +108,12 @@ for i in $(seq 0 $((count - 1))); do
     # Handle 'uses' step
     action_name_part=$(echo "$action_uses" | cut -d'@' -f1 | sed 's|[/]|-|g')
     action_id="action_${i}_${action_name_part}"
-    action_name=$(yq ".[$i].name // \"Run ${action_uses}\"" "$MERGED_ACTIONS_YAML_FILE")
+    # Get the original name, default if not provided
+    original_action_name=$(yq ".[$i].name // \"Run ${action_uses}\"" "$MERGED_ACTIONS_YAML_FILE")
+    # Store mapping: ID -> Original Name
+    jq --arg id "$action_id" --arg name "$original_action_name" '. + {($id): $name}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
 
-    echo "      - name: ${action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH"
+    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
     echo "        uses: ${action_uses}" >> "$TEMP_WORKFLOW_PATH"
 
@@ -121,10 +126,13 @@ for i in $(seq 0 $((count - 1))); do
 
   elif [ -n "$action_run" ]; then
     # Handle 'run' step
-    action_name=$(yq ".[$i].name // \"Run script ${i}\"" "$MERGED_ACTIONS_YAML_FILE")
     action_id="action_${i}_run"
+    # Get the original name, default if not provided
+    original_action_name=$(yq ".[$i].name // \"Run script ${i}\"" "$MERGED_ACTIONS_YAML_FILE")
+    # Store mapping: ID -> Original Name
+    jq --arg id "$action_id" --arg name "$original_action_name" '. + {($id): $name}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
 
-    echo "      - name: ${action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH"
+    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
 
     # Add shell if specified, default to bash
@@ -177,36 +185,20 @@ act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job d
 echo "::endgroup::"
 
 # Process the run results
-if [ -f "$RESULTS_FILE" ] && [ -f "$MERGED_ACTIONS_YAML_FILE" ]; then
-  echo "::debug::Reading results from ${RESULTS_FILE} and original actions from ${MERGED_ACTIONS_YAML_FILE}"
+if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
+  echo "::debug::Reading results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
   # Read raw results (steps context)
   RAW_RESULTS_JSON=$(cat "$RESULTS_FILE")
-  # Convert original actions YAML to JSON array
-  ORIGINAL_ACTIONS_JSON=$(yq -o=json '.' "$MERGED_ACTIONS_YAML_FILE")
+  # Read the generated ID->Name map
+  ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
 
-  # Use jq to merge original action names into the results
-  # 1. Create a map of original actions keyed by their generated ID
-  # 2. Iterate through the raw results (steps context)
-  # 3. For each step in raw results, find the matching original action by ID
-  # 4. Merge the step result with the original action object
-  # 5. Select desired fields (id, name, outcome, outputs) for the final output
-  ENHANCED_RESULTS_JSON=$(jq -n --argjson rawResults "$RAW_RESULTS_JSON" --argjson originalActions "$ORIGINAL_ACTIONS_JSON" '
-    # Create a map: { "generated_id": { original_action_object } }
-    ($originalActions | map(
-      . as $action |
-      ($action.uses // "" | if . != "" then "action_\(input_filename | split("/")[-1] | tonumber)_\(. | split("@")[0] | gsub("/"; "-"))" else "action_\(input_filename | split("/")[-1] | tonumber)_run" end) as $id | # Reconstruct the ID logic
-      { ($id): $action }
-    ) | add) as $originalMap
-    |
-    # Iterate through raw results (steps context map)
+  # Use jq to add the original name to each step result
+  ENHANCED_RESULTS_JSON=$(jq -n --argjson rawResults "$RAW_RESULTS_JSON" --argjson idNameMap "$ID_NAME_MAP_JSON" '
     $rawResults | to_entries | map(
       .key as $stepId | .value as $stepResult |
-      # Find original action, default name if not found (e.g., for setup/cleanup steps)
-      ($originalMap[$stepId] // {name: $stepId}) as $originalAction |
-      # Merge and select fields
       {
         id: $stepId,
-        name: $originalAction.name,
+        name: ($idNameMap[$stepId] // $stepId), # Use mapped name, fallback to stepId if not found
         outcome: $stepResult.outcome,
         outputs: $stepResult.outputs
       }
@@ -216,9 +208,9 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$MERGED_ACTIONS_YAML_FILE" ]; then
   # Check if jq command succeeded
   if [ $? -eq 0 ] && [ -n "$ENHANCED_RESULTS_JSON" ]; then
       RESULTS_JSON="$ENHANCED_RESULTS_JSON"
-      echo "::debug::Successfully merged action names into results."
+      echo "::debug::Successfully added action names to results."
   else
-      echo "::warning::Failed to merge action names into results using jq. Falling back to raw results."
+      echo "::warning::Failed to add action names to results using jq. Falling back to raw results."
       RESULTS_JSON="$RAW_RESULTS_JSON"
   fi
 
@@ -226,8 +218,8 @@ else
   if [ ! -f "$RESULTS_FILE" ]; then
       echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
   fi
-  if [ ! -f "$MERGED_ACTIONS_YAML_FILE" ]; then
-      echo "::warning::Original actions file ${MERGED_ACTIONS_YAML_FILE} not found."
+   if [ ! -f "$ID_NAME_MAP_FILE" ]; then
+      echo "::warning::ID->Name map file ${ID_NAME_MAP_FILE} not found."
   fi
   echo "::warning::Setting empty results due to missing files."
   RESULTS_JSON="[]" # Use empty array for consistency
@@ -277,6 +269,6 @@ echo "::debug::Action finished successfully."
 # Cleanup
 rm -f "$TEMP_WORKFLOW_PATH"
 rm -f "$RESULTS_FILE"
-rm -f "$ACTION_LIST_FILE" "$PRESETS_YAML_FILE" "$MERGED_ACTIONS_YAML_FILE" # Clean up all temp files
+rm -f "$ACTION_LIST_FILE" "$PRESETS_YAML_FILE" "$MERGED_ACTIONS_YAML_FILE" "$ID_NAME_MAP_FILE" # Clean up all temp files
 
 exit 0
