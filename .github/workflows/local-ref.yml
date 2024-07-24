@@ -1,4 +1,4 @@
-name: super action example (local reference)
+name: local ref
 
 on:
   push:
