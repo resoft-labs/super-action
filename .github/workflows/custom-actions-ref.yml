@@ -1,0 +1,46 @@
+name: custom actions only
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run_custom_steps:
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout needed here unless custom actions require repo files
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Custom Actions with super-action
+        id: super_run
+        # Use the pre-built Docker image from GHCR
+        # Replace ':main' with ':latest' or a specific version tag if needed
+        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
+        with:
+          # Define custom actions to run
+          action_list: |
+            - name: Simple Echo
+              run: echo "Running a custom echo command."
+            - uses: actions/setup-python@v5
+              with:
+                python-version: '3.12'
+            - name: Show Python Version
+              run: python --version
+
+          # Optionally save results
+          results_output_file: outputs/custom_actions_results.json
+
+          # Optionally disable results logging (default is true)
+          display_results: "true"
+
+      # Results are automatically logged by super-action (unless disabled)
+      # Optionally upload artifact if results_output_file was used
+      - name: Upload Custom Actions Results Artifact
+        #   if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-actions-results
+          path: outputs/custom_actions_results.json
+          if-no-files-found: warn
