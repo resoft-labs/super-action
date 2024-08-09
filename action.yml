@@ -52,5 +52,6 @@ outputs:
 
 runs:
   using: 'docker'
+  image: 'Dockerfile'
   # Point to the pre-built image on GitHub Container Registry
-  image: 'docker://ghcr.io/resoft-labs/super-action:main'
+  # image: 'docker://ghcr.io/resoft-labs/super-action:main'
