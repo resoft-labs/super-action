@@ -192,6 +192,21 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   # Read the generated ID->Name map
   ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
 
+  # --- Start Debugging ---
+  echo "::debug::--- Debugging JSON content ---"
+  echo "::debug::ID->Name Map File (${ID_NAME_MAP_FILE}) Content:"
+  cat "$ID_NAME_MAP_FILE"
+  echo "::debug::Validating ID->Name Map JSON:"
+  if jq -e . "$ID_NAME_MAP_FILE" > /dev/null; then echo "::debug::ID->Name Map JSON is valid."; else echo "::error::ID->Name Map JSON is INVALID."; fi
+
+  echo "::debug::Results File (${RESULTS_FILE}) Content:"
+  cat "$RESULTS_FILE"
+  echo "::debug::Validating Results JSON:"
+  if jq -e . "$RESULTS_FILE" > /dev/null; then echo "::debug::Results JSON is valid."; else echo "::error::Results JSON is INVALID."; fi
+  echo "::debug::--- End Debugging JSON content ---"
+  # --- End Debugging ---
+
+
   # Use jq to add the original name to each step result
   ENHANCED_RESULTS_JSON=$(jq -n --argjson rawResults "$RAW_RESULTS_JSON" --argjson idNameMap "$ID_NAME_MAP_JSON" '
     $rawResults | to_entries | map(
