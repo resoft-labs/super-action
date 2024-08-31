@@ -165,8 +165,8 @@ cat << EOF >> "$TEMP_WORKFLOW_PATH"
         shell: bash
         run: |
           echo "Writing results to ${RESULTS_FILE}..."
-          # Use printf to safely write JSON content to the file
-          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
+          # Pipe toJSON output through jq to ensure valid JSON is written
+          printf '%s\n' "\${{ toJSON(steps) }}" | jq '.' > "${RESULTS_FILE}"
           echo "Results written."
 EOF
 
