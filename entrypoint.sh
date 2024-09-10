@@ -165,8 +165,8 @@ cat << EOF >> "$TEMP_WORKFLOW_PATH"
         shell: bash
         run: |
           echo "Writing results to ${RESULTS_FILE}..."
-          # Pipe toJSON output through jq to ensure valid JSON is written
-          printf '%s\n' "\${{ toJSON(steps) }}" | jq '.' > "${RESULTS_FILE}"
+          # Use printf; subsequent processing will sanitize the JSON
+          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
           echo "Results written."
 EOF
 
@@ -187,8 +187,16 @@ echo "::endgroup::"
 # Process the run results
 if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   echo "::debug::Reading results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
-  # Read raw results (steps context)
-  RAW_RESULTS_JSON=$(cat "$RESULTS_FILE")
+
+  # Sanitize the results file content into strictly valid JSON using yq
+  echo "::debug::Sanitizing results JSON using yq..."
+  SANITIZED_RESULTS_JSON=$(yq -o=json '.' "$RESULTS_FILE")
+  if [ $? -ne 0 ] || [ -z "$SANITIZED_RESULTS_JSON" ]; then
+      echo "::error::Failed to sanitize results JSON from ${RESULTS_FILE} using yq."
+      # Fallback or exit? For now, fallback to empty results.
+      SANITIZED_RESULTS_JSON="{}" # Or maybe "[]" depending on expected final format
+  fi
+
   # Read the generated ID->Name map
   ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
 
@@ -204,12 +212,25 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   echo "::debug::Validating Results JSON:"
   if jq -e . "$RESULTS_FILE" > /dev/null; then echo "::debug::Results JSON is valid."; else echo "::error::Results JSON is INVALID."; fi
   echo "::debug::--- End Debugging JSON content ---"
+  # --- Start Debugging ---
+  echo "::debug::--- Debugging JSON content ---"
+  echo "::debug::ID->Name Map File (${ID_NAME_MAP_FILE}) Content:"
+  cat "$ID_NAME_MAP_FILE"
+  echo "::debug::Validating ID->Name Map JSON:"
+  if jq -e . "$ID_NAME_MAP_FILE" > /dev/null; then echo "::debug::ID->Name Map JSON is valid."; else echo "::error::ID->Name Map JSON is INVALID."; fi
+
+  # Debug the SANITIZED results, not the raw file
+  echo "::debug::Sanitized Results JSON Content:"
+  echo "$SANITIZED_RESULTS_JSON"
+  echo "::debug::Validating Sanitized Results JSON:"
+  if echo "$SANITIZED_RESULTS_JSON" | jq -e . > /dev/null; then echo "::debug::Sanitized Results JSON is valid."; else echo "::error::Sanitized Results JSON is INVALID."; fi
+  echo "::debug::--- End Debugging JSON content ---"
   # --- End Debugging ---
 
 
-  # Use jq to add the original name to each step result
-  ENHANCED_RESULTS_JSON=$(jq -n --argjson rawResults "$RAW_RESULTS_JSON" --argjson idNameMap "$ID_NAME_MAP_JSON" '
-    $rawResults | to_entries | map(
+  # Use jq to add the original name to each step result using SANITIZED JSON
+  ENHANCED_RESULTS_JSON=$(jq -n --argjson sanitizedResults "$SANITIZED_RESULTS_JSON" --argjson idNameMap "$ID_NAME_MAP_JSON" '
+    $sanitizedResults | to_entries | map(
       .key as $stepId | .value as $stepResult |
       {
         id: $stepId,
@@ -225,8 +246,9 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
       RESULTS_JSON="$ENHANCED_RESULTS_JSON"
       echo "::debug::Successfully added action names to results."
   else
-      echo "::warning::Failed to add action names to results using jq. Falling back to raw results."
-      RESULTS_JSON="$RAW_RESULTS_JSON"
+      echo "::warning::Failed to add action names to results using jq. Falling back to sanitized results."
+      # Fallback to the sanitized JSON if enhancement fails
+      RESULTS_JSON="$SANITIZED_RESULTS_JSON"
   fi
 
 else
