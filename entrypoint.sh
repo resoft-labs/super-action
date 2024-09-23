@@ -158,17 +158,54 @@ for i in $(seq 0 $((count - 1))); do
 done
 
 # Add the final step to collect results and write to a file
-cat << EOF >> "$TEMP_WORKFLOW_PATH"
-      - name: Collect Results
-        id: collect_results_step
-        if: always() # Ensure this runs even if previous steps fail
-        shell: bash
-        run: |
-          echo "Writing results to ${RESULTS_FILE}..."
-          # Use printf; subsequent processing will sanitize the JSON
-          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
-          echo "Results written."
-EOF
+# This step now manually constructs the JSON array using workflow contexts
+echo "      - name: Collect Results" >> "$TEMP_WORKFLOW_PATH"
+echo "        id: collect_results_step" >> "$TEMP_WORKFLOW_PATH"
+echo "        if: always()" >> "$TEMP_WORKFLOW_PATH"
+echo "        shell: bash" >> "$TEMP_WORKFLOW_PATH"
+# Pass the ID->Name map JSON as an environment variable
+# Ensure proper escaping for the env var value
+ID_NAME_MAP_JSON_ESCAPED=$(jq -c . "$ID_NAME_MAP_FILE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+echo "        env:" >> "$TEMP_WORKFLOW_PATH"
+echo "          ID_NAME_MAP_JSON: \"${ID_NAME_MAP_JSON_ESCAPED}\"" >> "$TEMP_WORKFLOW_PATH"
+# --- Start of complex run script ---
+echo "        run: |" >> "$TEMP_WORKFLOW_PATH"
+echo "          echo 'Constructing results JSON array...'" >> "$TEMP_WORKFLOW_PATH"
+echo "          echo '[' > \"${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
+echo "          # Load the ID->Name map from the environment variable" >> "$TEMP_WORKFLOW_PATH"
+echo "          declare -A id_name_map # Use associative array" >> "$TEMP_WORKFLOW_PATH"
+echo "          while IFS='=' read -r key value; do" >> "$TEMP_WORKFLOW_PATH"
+echo "              # Trim quotes and unescape value if needed (basic version)" >> "$TEMP_WORKFLOW_PATH"
+echo "              key=\$(echo \"\$key\" | sed 's/^\"//;s/\"\$//')" >> "$TEMP_WORKFLOW_PATH"
+echo "              value=\$(echo \"\$value\" | sed 's/^\"//;s/\"\$//')" >> "$TEMP_WORKFLOW_PATH"
+echo "              id_name_map[\"\$key\"]=\"\$value\"" >> "$TEMP_WORKFLOW_PATH"
+echo "          done < <(echo \"\$ID_NAME_MAP_JSON\" | jq -r 'to_entries | .[] | \"\(.key)=\(.value)\"')" >> "$TEMP_WORKFLOW_PATH"
+# Iterate through the known step IDs from the map keys
+echo "          FIRST_STEP=true" >> "$TEMP_WORKFLOW_PATH"
+echo "          for STEP_ID in \"\${!id_name_map[@]}\"; do" >> "$TEMP_WORKFLOW_PATH"
+echo "            ORIGINAL_NAME=\${id_name_map[\$STEP_ID]}" >> "$TEMP_WORKFLOW_PATH"
+# Get outcome and outputs using workflow context expressions
+echo "            STEP_OUTCOME=\"\${{ steps.\${STEP_ID}.outcome }}\"" >> "$TEMP_WORKFLOW_PATH"
+# Get outputs as JSON string - handle potential empty outputs
+echo "            STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'" >> "$TEMP_WORKFLOW_PATH"
+echo "            STEP_OUTPUTS_JSON=\$(echo \"\$STEP_OUTPUTS_RAW\" | jq -c . 2>/dev/null || echo '{}')" >> "$TEMP_WORKFLOW_PATH" # Ensure valid JSON, default to {}
+# Escape the original name for JSON - Use jq for robust escaping
+echo "            JSON_NAME=\$(echo \"\$ORIGINAL_NAME\" | jq -R -s .)" >> "$TEMP_WORKFLOW_PATH"
+# Append to results file
+echo "            if [ \"\$FIRST_STEP\" = true ]; then FIRST_STEP=false; else echo ',' >> \"\${RESULTS_FILE}\"; fi" >> "$TEMP_WORKFLOW_PATH"
+echo "            printf '{\"id\":\"%s\",\"name\":%s,\"outcome\":\"%s\",\"outputs\":%s}' \"\$STEP_ID\" \"\$JSON_NAME\" \"\$STEP_OUTCOME\" \"\$STEP_OUTPUTS_JSON\" >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
+echo "          done" >> "$TEMP_WORKFLOW_PATH"
+# Add the collect_results_step itself
+echo "          STEP_ID='collect_results_step'" >> "$TEMP_WORKFLOW_PATH"
+echo "          STEP_OUTCOME=\"\${{ steps.\${STEP_ID}.outcome }}\"" >> "$TEMP_WORKFLOW_PATH"
+echo "          STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'" >> "$TEMP_WORKFLOW_PATH"
+echo "          STEP_OUTPUTS_JSON=\$(echo \"\$STEP_OUTPUTS_RAW\" | jq -c . 2>/dev/null || echo '{}')" >> "$TEMP_WORKFLOW_PATH"
+echo "          if [ \"\$FIRST_STEP\" = true ]; then FIRST_STEP=false; else echo ',' >> \"\${RESULTS_FILE}\"; fi" >> "$TEMP_WORKFLOW_PATH"
+echo "          printf '{\"id\":\"%s\",\"name\":\"%s\",\"outcome\":\"%s\",\"outputs\":%s}' \"\$STEP_ID\" \"Collect Results\" \"\$STEP_OUTCOME\" \"\$STEP_OUTPUTS_JSON\" >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
+# --- End of complex run script ---
+echo "          echo ']' >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
+echo "          echo 'Finished constructing results JSON.'" >> "$TEMP_WORKFLOW_PATH"
+# End of the Collect Results step definition
 
 echo "::debug::Generated workflow content:"
 cat "$TEMP_WORKFLOW_PATH"
@@ -185,82 +222,24 @@ act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job d
 echo "::endgroup::"
 
 # Process the run results
-if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
-  echo "::debug::Reading results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
-
-  # Sanitize the results file content into strictly valid JSON using yq
-  echo "::debug::Sanitizing results JSON using yq..."
-  SANITIZED_RESULTS_JSON=$(yq -o=json '.' "$RESULTS_FILE")
-  if [ $? -ne 0 ] || [ -z "$SANITIZED_RESULTS_JSON" ]; then
-      echo "::error::Failed to sanitize results JSON from ${RESULTS_FILE} using yq."
-      # Fallback or exit? For now, fallback to empty results.
-      SANITIZED_RESULTS_JSON="{}" # Or maybe "[]" depending on expected final format
-  fi
-
-  # Read the generated ID->Name map
-  ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
-
-  # --- Start Debugging ---
-  echo "::debug::--- Debugging JSON content ---"
-  echo "::debug::ID->Name Map File (${ID_NAME_MAP_FILE}) Content:"
-  cat "$ID_NAME_MAP_FILE"
-  echo "::debug::Validating ID->Name Map JSON:"
-  if jq -e . "$ID_NAME_MAP_FILE" > /dev/null; then echo "::debug::ID->Name Map JSON is valid."; else echo "::error::ID->Name Map JSON is INVALID."; fi
-
-  echo "::debug::Results File (${RESULTS_FILE}) Content:"
-  cat "$RESULTS_FILE"
-  echo "::debug::Validating Results JSON:"
-  if jq -e . "$RESULTS_FILE" > /dev/null; then echo "::debug::Results JSON is valid."; else echo "::error::Results JSON is INVALID."; fi
-  echo "::debug::--- End Debugging JSON content ---"
-  # --- Start Debugging ---
-  echo "::debug::--- Debugging JSON content ---"
-  echo "::debug::ID->Name Map File (${ID_NAME_MAP_FILE}) Content:"
-  cat "$ID_NAME_MAP_FILE"
-  echo "::debug::Validating ID->Name Map JSON:"
-  if jq -e . "$ID_NAME_MAP_FILE" > /dev/null; then echo "::debug::ID->Name Map JSON is valid."; else echo "::error::ID->Name Map JSON is INVALID."; fi
-
-  # Debug the SANITIZED results, not the raw file
-  echo "::debug::Sanitized Results JSON Content:"
-  echo "$SANITIZED_RESULTS_JSON"
-  echo "::debug::Validating Sanitized Results JSON:"
-  if echo "$SANITIZED_RESULTS_JSON" | jq -e . > /dev/null; then echo "::debug::Sanitized Results JSON is valid."; else echo "::error::Sanitized Results JSON is INVALID."; fi
-  echo "::debug::--- End Debugging JSON content ---"
-  # --- End Debugging ---
-
-
-  # Use jq to add the original name to each step result using SANITIZED JSON
-  ENHANCED_RESULTS_JSON=$(jq -n --argjson sanitizedResults "$SANITIZED_RESULTS_JSON" --argjson idNameMap "$ID_NAME_MAP_JSON" '
-    $sanitizedResults | to_entries | map(
-      .key as $stepId | .value as $stepResult |
-      {
-        id: $stepId,
-        name: ($idNameMap[$stepId] // $stepId), # Use mapped name, fallback to stepId if not found
-        outcome: $stepResult.outcome,
-        outputs: $stepResult.outputs
-      }
-    )
-  ')
-
-  # Check if jq command succeeded
-  if [ $? -eq 0 ] && [ -n "$ENHANCED_RESULTS_JSON" ]; then
-      RESULTS_JSON="$ENHANCED_RESULTS_JSON"
-      echo "::debug::Successfully added action names to results."
+# The results file should now contain the correctly formatted JSON array
+if [ -f "$RESULTS_FILE" ]; then
+  echo "::debug::Reading results from ${RESULTS_FILE}"
+  RESULTS_JSON=$(cat "$RESULTS_FILE")
+  # Validate the final JSON
+  if echo "$RESULTS_JSON" | jq -e . > /dev/null; then
+      echo "::debug::Final results JSON is valid."
   else
-      echo "::warning::Failed to add action names to results using jq. Falling back to sanitized results."
-      # Fallback to the sanitized JSON if enhancement fails
-      RESULTS_JSON="$SANITIZED_RESULTS_JSON"
+      echo "::error::Final results JSON is INVALID. Content:"
+      cat "$RESULTS_FILE"
+      RESULTS_JSON="[]" # Fallback to empty array
   fi
-
 else
-  if [ ! -f "$RESULTS_FILE" ]; then
-      echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
-  fi
-   if [ ! -f "$ID_NAME_MAP_FILE" ]; then
-      echo "::warning::ID->Name map file ${ID_NAME_MAP_FILE} not found."
-  fi
-  echo "::warning::Setting empty results due to missing files."
+  echo "::warning::Results file ${RESULTS_FILE} not found after act execution. Setting empty results."
   RESULTS_JSON="[]" # Use empty array for consistency
 fi
+# Remove the ID map file as it's no longer needed after workflow generation
+rm -f "$ID_NAME_MAP_FILE"
 
 
 # Set Action Output
@@ -306,6 +285,6 @@ echo "::debug::Action finished successfully."
 # Cleanup
 rm -f "$TEMP_WORKFLOW_PATH"
 rm -f "$RESULTS_FILE"
-rm -f "$ACTION_LIST_FILE" "$PRESETS_YAML_FILE" "$MERGED_ACTIONS_YAML_FILE" "$ID_NAME_MAP_FILE" # Clean up all temp files
+rm -f "$ACTION_LIST_FILE" "$PRESETS_YAML_FILE" "$MERGED_ACTIONS_YAML_FILE" # Clean up main temp files
 
 exit 0
