@@ -1,8 +1,9 @@
 name: example
 
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
+  workflow_dispatch:
 
 jobs:
   run_dynamic_steps:

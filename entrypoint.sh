@@ -157,55 +157,18 @@ for i in $(seq 0 $((count - 1))); do
   fi
 done
 
-# Add the final step to collect results and write to a file
-# This step now manually constructs the JSON array using workflow contexts
-echo "      - name: Collect Results" >> "$TEMP_WORKFLOW_PATH"
-echo "        id: collect_results_step" >> "$TEMP_WORKFLOW_PATH"
-echo "        if: always()" >> "$TEMP_WORKFLOW_PATH"
-echo "        shell: bash" >> "$TEMP_WORKFLOW_PATH"
-# Pass the ID->Name map JSON as an environment variable
-# Ensure proper escaping for the env var value
-ID_NAME_MAP_JSON_ESCAPED=$(jq -c . "$ID_NAME_MAP_FILE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-echo "        env:" >> "$TEMP_WORKFLOW_PATH"
-echo "          ID_NAME_MAP_JSON: \"${ID_NAME_MAP_JSON_ESCAPED}\"" >> "$TEMP_WORKFLOW_PATH"
-# --- Start of complex run script ---
-echo "        run: |" >> "$TEMP_WORKFLOW_PATH"
-echo "          echo 'Constructing results JSON array...'" >> "$TEMP_WORKFLOW_PATH"
-echo "          echo '[' > \"${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
-echo "          # Load the ID->Name map from the environment variable" >> "$TEMP_WORKFLOW_PATH"
-echo "          declare -A id_name_map # Use associative array" >> "$TEMP_WORKFLOW_PATH"
-echo "          while IFS='=' read -r key value; do" >> "$TEMP_WORKFLOW_PATH"
-echo "              # Trim quotes and unescape value if needed (basic version)" >> "$TEMP_WORKFLOW_PATH"
-echo "              key=\$(echo \"\$key\" | sed 's/^\"//;s/\"\$//')" >> "$TEMP_WORKFLOW_PATH"
-echo "              value=\$(echo \"\$value\" | sed 's/^\"//;s/\"\$//')" >> "$TEMP_WORKFLOW_PATH"
-echo "              id_name_map[\"\$key\"]=\"\$value\"" >> "$TEMP_WORKFLOW_PATH"
-echo "          done < <(echo \"\$ID_NAME_MAP_JSON\" | jq -r 'to_entries | .[] | \"\(.key)=\(.value)\"')" >> "$TEMP_WORKFLOW_PATH"
-# Iterate through the known step IDs from the map keys
-echo "          FIRST_STEP=true" >> "$TEMP_WORKFLOW_PATH"
-echo "          for STEP_ID in \"\${!id_name_map[@]}\"; do" >> "$TEMP_WORKFLOW_PATH"
-echo "            ORIGINAL_NAME=\${id_name_map[\$STEP_ID]}" >> "$TEMP_WORKFLOW_PATH"
-# Get outcome and outputs using workflow context expressions
-echo "            STEP_OUTCOME=\"\${{ steps.\${STEP_ID}.outcome }}\"" >> "$TEMP_WORKFLOW_PATH"
-# Get outputs as JSON string - handle potential empty outputs
-echo "            STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'" >> "$TEMP_WORKFLOW_PATH"
-echo "            STEP_OUTPUTS_JSON=\$(echo \"\$STEP_OUTPUTS_RAW\" | jq -c . 2>/dev/null || echo '{}')" >> "$TEMP_WORKFLOW_PATH" # Ensure valid JSON, default to {}
-# Escape the original name for JSON - Use jq for robust escaping
-echo "            JSON_NAME=\$(echo \"\$ORIGINAL_NAME\" | jq -R -s .)" >> "$TEMP_WORKFLOW_PATH"
-# Append to results file
-echo "            if [ \"\$FIRST_STEP\" = true ]; then FIRST_STEP=false; else echo ',' >> \"\${RESULTS_FILE}\"; fi" >> "$TEMP_WORKFLOW_PATH"
-echo "            printf '{\"id\":\"%s\",\"name\":%s,\"outcome\":\"%s\",\"outputs\":%s}' \"\$STEP_ID\" \"\$JSON_NAME\" \"\$STEP_OUTCOME\" \"\$STEP_OUTPUTS_JSON\" >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
-echo "          done" >> "$TEMP_WORKFLOW_PATH"
-# Add the collect_results_step itself
-echo "          STEP_ID='collect_results_step'" >> "$TEMP_WORKFLOW_PATH"
-echo "          STEP_OUTCOME=\"\${{ steps.\${STEP_ID}.outcome }}\"" >> "$TEMP_WORKFLOW_PATH"
-echo "          STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'" >> "$TEMP_WORKFLOW_PATH"
-echo "          STEP_OUTPUTS_JSON=\$(echo \"\$STEP_OUTPUTS_RAW\" | jq -c . 2>/dev/null || echo '{}')" >> "$TEMP_WORKFLOW_PATH"
-echo "          if [ \"\$FIRST_STEP\" = true ]; then FIRST_STEP=false; else echo ',' >> \"\${RESULTS_FILE}\"; fi" >> "$TEMP_WORKFLOW_PATH"
-echo "          printf '{\"id\":\"%s\",\"name\":\"%s\",\"outcome\":\"%s\",\"outputs\":%s}' \"\$STEP_ID\" \"Collect Results\" \"\$STEP_OUTCOME\" \"\$STEP_OUTPUTS_JSON\" >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
-# --- End of complex run script ---
-echo "          echo ']' >> \"\${RESULTS_FILE}\"" >> "$TEMP_WORKFLOW_PATH"
-echo "          echo 'Finished constructing results JSON.'" >> "$TEMP_WORKFLOW_PATH"
-# End of the Collect Results step definition
+# Add the final step to collect results and write to a file (simple version)
+cat << EOF >> "$TEMP_WORKFLOW_PATH"
+      - name: Collect Results
+        id: collect_results_step
+        if: always() # Ensure this runs even if previous steps fail
+        shell: bash
+        run: |
+          echo "Writing raw results to ${RESULTS_FILE}..."
+          # Use printf; subsequent processing will parse this potentially non-standard JSON
+          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
+          echo "Raw results written."
+EOF
 
 echo "::debug::Generated workflow content:"
 cat "$TEMP_WORKFLOW_PATH"
@@ -222,20 +185,74 @@ act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job d
 echo "::endgroup::"
 
 # Process the run results
-# The results file should now contain the correctly formatted JSON array
-if [ -f "$RESULTS_FILE" ]; then
-  echo "::debug::Reading results from ${RESULTS_FILE}"
-  RESULTS_JSON=$(cat "$RESULTS_FILE")
-  # Validate the final JSON
-  if echo "$RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Final results JSON is valid."
+if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
+  echo "::debug::Processing results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
+  # Read the potentially non-standard JSON results
+  RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
+  # Read the ID->Name map
+  ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
+
+  FINAL_RESULTS_ARRAY="[" # Start building the final JSON array string
+  FIRST_ENTRY=true
+
+  # Iterate through the step IDs from the map file
+  STEP_IDS=$(jq -r 'keys[]' "$ID_NAME_MAP_FILE")
+  for STEP_ID in $STEP_IDS; do
+      ORIGINAL_NAME=$(jq -r --arg id "$STEP_ID" '.[$id]' "$ID_NAME_MAP_JSON")
+      JSON_NAME=$(echo "$ORIGINAL_NAME" | jq -R -s .) # Escape name for JSON
+
+      # Extract outcome for this STEP_ID from raw results using grep/sed
+      # This assumes a structure like: step_id: { ..., outcome: value, ... }
+      # It extracts the first 'outcome: value' line after the step_id line
+      STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | grep -A 5 "^  ${STEP_ID}:" | grep 'outcome:' | head -n 1 | sed -e 's/.*outcome: //; s/,*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+      # Default outcome if not found
+      STEP_OUTCOME=${STEP_OUTCOME:-unknown}
+
+      # Extract outputs object string for this STEP_ID
+      # This is complex with shell tools, find the 'outputs: {' line and extract until the matching '}'
+      # Using awk for block extraction might be better, but let's try grep/sed first (might be fragile)
+      # This extracts lines between "outputs: {" and the next "}," or "}" at the same indentation level
+      OUTPUTS_STR=$(echo "$RAW_RESULTS_CONTENT" | sed -n "/^  ${STEP_ID}:/,/^\s*}/p" | sed -n '/outputs: {/,/}/p' | sed '1d;$d' | sed 's/^    //') # Basic attempt, likely needs refinement
+      # Try to format the extracted outputs as valid JSON
+      STEP_OUTPUTS_JSON=$(echo "{${OUTPUTS_STR}}" | jq -c . 2>/dev/null || echo '{}')
+
+      # Append to the final array string
+      if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else FINAL_RESULTS_ARRAY+=","; fi
+      JSON_ENTRY=$(printf '{"id":"%s","name":%s,"outcome":"%s","outputs":%s}' "$STEP_ID" "$JSON_NAME" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
+      FINAL_RESULTS_ARRAY+="$JSON_ENTRY"
+  done
+
+  # Add the collect_results_step manually if needed (assuming it's always successful here)
+   # Extract outcome for collect_results_step
+   STEP_ID="collect_results_step"
+   STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | grep -A 5 "^  ${STEP_ID}:" | grep 'outcome:' | head -n 1 | sed -e 's/.*outcome: //; s/,*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+   STEP_OUTCOME=${STEP_OUTCOME:-unknown}
+   STEP_OUTPUTS_JSON="{}" # Assume no relevant outputs
+   if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else FINAL_RESULTS_ARRAY+=","; fi
+   JSON_ENTRY=$(printf '{"id":"%s","name":"%s","outcome":"%s","outputs":%s}' "$STEP_ID" "Collect Results" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
+   FINAL_RESULTS_ARRAY+="$JSON_ENTRY"
+
+
+  FINAL_RESULTS_ARRAY+="]" # Close the array
+
+  # Validate the constructed JSON array
+  if echo "$FINAL_RESULTS_ARRAY" | jq -e . > /dev/null; then
+      RESULTS_JSON="$FINAL_RESULTS_ARRAY"
+      echo "::debug::Successfully parsed and formatted results."
   else
-      echo "::error::Final results JSON is INVALID. Content:"
-      cat "$RESULTS_FILE"
-      RESULTS_JSON="[]" # Fallback to empty array
+      echo "::error::Failed to construct valid final results JSON. Falling back to empty array."
+      cat "$RESULTS_FILE" # Show raw results for debugging
+      RESULTS_JSON="[]"
   fi
+
 else
-  echo "::warning::Results file ${RESULTS_FILE} not found after act execution. Setting empty results."
+  if [ ! -f "$RESULTS_FILE" ]; then
+      echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
+  fi
+   if [ ! -f "$ID_NAME_MAP_FILE" ]; then
+      echo "::warning::ID->Name map file ${ID_NAME_MAP_FILE} not found."
+  fi
+  echo "::warning::Setting empty results due to missing files."
   RESULTS_JSON="[]" # Use empty array for consistency
 fi
 # Remove the ID map file as it's no longer needed after workflow generation
