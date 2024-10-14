@@ -198,7 +198,8 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   # Iterate through the step IDs from the map file
   STEP_IDS=$(jq -r 'keys[]' "$ID_NAME_MAP_FILE")
   for STEP_ID in $STEP_IDS; do
-      ORIGINAL_NAME=$(jq -r --arg id "$STEP_ID" '.[$id]' "$ID_NAME_MAP_JSON")
+      # Pipe the map JSON content into jq instead of passing as filename
+      ORIGINAL_NAME=$(echo "$ID_NAME_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id]')
       JSON_NAME=$(echo "$ORIGINAL_NAME" | jq -R -s .) # Escape name for JSON
 
       # Extract outcome for this STEP_ID from raw results using grep/sed
