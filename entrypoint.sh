@@ -108,10 +108,14 @@ for i in $(seq 0 $((count - 1))); do
     # Handle 'uses' step
     action_name_part=$(echo "$action_uses" | cut -d'@' -f1 | sed 's|[/]|-|g')
     action_id="action_${i}_${action_name_part}"
-    # Get the original name, default if not provided
-    original_action_name=$(yq ".[$i].name // \"Run ${action_uses}\"" "$MERGED_ACTIONS_YAML_FILE")
-    # Store mapping: ID -> Original Name
-    jq --arg id "$action_id" --arg name "$original_action_name" '. + {($id): $name}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+    # Get the original name, default if not provided, and trim whitespace/newlines
+    original_action_name=$(yq "(.[\$i].name // \"Run ${action_uses}\") | trim" "$MERGED_ACTIONS_YAML_FILE")
+    # Store mapping: ID -> {name: Original Name, uses: Action Uses}
+    jq --arg id "$action_id" \
+       --arg name "$original_action_name" \
+       --arg uses_str "$action_uses" \
+       '. + {($id): {"name": $name, "uses": $uses_str}}' \
+       "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
 
     echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
@@ -127,10 +131,13 @@ for i in $(seq 0 $((count - 1))); do
   elif [ -n "$action_run" ]; then
     # Handle 'run' step
     action_id="action_${i}_run"
-    # Get the original name, default if not provided
-    original_action_name=$(yq ".[$i].name // \"Run script ${i}\"" "$MERGED_ACTIONS_YAML_FILE")
-    # Store mapping: ID -> Original Name
-    jq --arg id "$action_id" --arg name "$original_action_name" '. + {($id): $name}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+    # Get the original name, default if not provided, and trim whitespace/newlines
+    original_action_name=$(yq "(.[\$i].name // \"Run script \${i}\") | trim" "$MERGED_ACTIONS_YAML_FILE")
+    # Store mapping: ID -> {name: Original Name, uses: null}
+    jq --arg id "$action_id" \
+       --arg name "$original_action_name" \
+       '. + {($id): {"name": $name, "uses": null}}' \
+       "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
 
     echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
@@ -195,17 +202,27 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   FINAL_RESULTS_ARRAY="[" # Start building the final JSON array string
   FIRST_ENTRY=true
 
-  # Iterate through the step IDs from the map file
-  STEP_IDS=$(jq -r 'keys[]' "$ID_NAME_MAP_FILE")
-  for STEP_ID in $STEP_IDS; do
-      # Pipe the map JSON content into jq instead of passing as filename
-      ORIGINAL_NAME=$(echo "$ID_NAME_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id]')
-      JSON_NAME=$(echo "$ORIGINAL_NAME" | jq -R -s .) # Escape name for JSON
+  # Extract all top-level keys (step IDs) from the raw results content
+  # This requires careful parsing as it's not guaranteed valid JSON/YAML
+  # Using grep to find lines starting with "  step_id:"
+  ALL_STEP_IDS=$(echo "$RAW_RESULTS_CONTENT" | grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' | sed -e 's/^[[:space:]]*//; s/:.*//')
 
-      # Extract outcome for this STEP_ID from raw results using grep/sed
-      # This assumes a structure like: step_id: { ..., outcome: value, ... }
-      # It extracts the first 'outcome: value' line after the step_id line
-      STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | grep -A 5 "^  ${STEP_ID}:" | grep 'outcome:' | head -n 1 | sed -e 's/.*outcome: //; s/,*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  for STEP_ID in $ALL_STEP_IDS; do
+      # Look up info from the map using the current STEP_ID
+      STEP_INFO_JSON=$(echo "$ID_NAME_MAP_JSON" | jq -c --arg id "$STEP_ID" '.[$id] // {}') # Get map entry or empty object
+      ORIGINAL_NAME=$(echo "$STEP_INFO_JSON" | jq -r '.name // null')
+      USES_STR=$(echo "$STEP_INFO_JSON" | jq -r '.uses // null')
+
+      # Use mapped name if available, otherwise use the step ID itself
+      DISPLAY_NAME=${ORIGINAL_NAME:-$STEP_ID}
+      JSON_NAME=$(echo "$DISPLAY_NAME" | jq -R -s .) # Escape name for JSON
+      JSON_USES=$(echo "$USES_STR" | jq -R -s .) # Escape uses for JSON (will be "null" if not applicable)
+
+
+      # Extract outcome for this STEP_ID using awk for better block handling
+      # Find the block starting with "  step_id:" and ending with "  },"
+      # Within that block, find the line "outcome: value"
+      STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | awk -v step_id="^  ${STEP_ID}:" '/^\s*}/ { if(p) p=0 } $0 ~ step_id { p=1 } p && /outcome:/ { print $2; exit }' | sed 's/,*$//')
       # Default outcome if not found
       STEP_OUTCOME=${STEP_OUTCOME:-unknown}
 
@@ -219,20 +236,13 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
 
       # Append to the final array string
       if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else FINAL_RESULTS_ARRAY+=","; fi
-      JSON_ENTRY=$(printf '{"id":"%s","name":%s,"outcome":"%s","outputs":%s}' "$STEP_ID" "$JSON_NAME" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
+      # Add the 'uses' field
+      JSON_ENTRY=$(printf '{"id":"%s","name":%s,"uses":%s,"outcome":"%s","outputs":%s}' \
+          "$STEP_ID" "$JSON_NAME" "$JSON_USES" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
       FINAL_RESULTS_ARRAY+="$JSON_ENTRY"
   done
 
-  # Add the collect_results_step manually if needed (assuming it's always successful here)
-   # Extract outcome for collect_results_step
-   STEP_ID="collect_results_step"
-   STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | grep -A 5 "^  ${STEP_ID}:" | grep 'outcome:' | head -n 1 | sed -e 's/.*outcome: //; s/,*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
-   STEP_OUTCOME=${STEP_OUTCOME:-unknown}
-   STEP_OUTPUTS_JSON="{}" # Assume no relevant outputs
-   if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else FINAL_RESULTS_ARRAY+=","; fi
-   JSON_ENTRY=$(printf '{"id":"%s","name":"%s","outcome":"%s","outputs":%s}' "$STEP_ID" "Collect Results" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
-   FINAL_RESULTS_ARRAY+="$JSON_ENTRY"
-
+  # No need to add collect_results_step manually, it should be captured by iterating ALL_STEP_IDS
 
   FINAL_RESULTS_ARRAY+="]" # Close the array
 
