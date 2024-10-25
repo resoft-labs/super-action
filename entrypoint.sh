@@ -108,8 +108,8 @@ for i in $(seq 0 $((count - 1))); do
     # Handle 'uses' step
     action_name_part=$(echo "$action_uses" | cut -d'@' -f1 | sed 's|[/]|-|g')
     action_id="action_${i}_${action_name_part}"
-    # Get the original name, default if not provided, and trim whitespace/newlines
-    original_action_name=$(yq "(.[\$i].name // \"Run ${action_uses}\") | trim" "$MERGED_ACTIONS_YAML_FILE")
+    # Get the original name, default if not provided, trim whitespace, and remove newlines
+    original_action_name=$(yq "(.[\$i].name // \"Run ${action_uses}\") | trim" "$MERGED_ACTIONS_YAML_FILE" | tr -d '\n')
     # Store mapping: ID -> {name: Original Name, uses: Action Uses}
     jq --arg id "$action_id" \
        --arg name "$original_action_name" \
@@ -131,8 +131,8 @@ for i in $(seq 0 $((count - 1))); do
   elif [ -n "$action_run" ]; then
     # Handle 'run' step
     action_id="action_${i}_run"
-    # Get the original name, default if not provided, and trim whitespace/newlines
-    original_action_name=$(yq "(.[\$i].name // \"Run script \${i}\") | trim" "$MERGED_ACTIONS_YAML_FILE")
+    # Get the original name, default if not provided, trim whitespace, and remove newlines
+    original_action_name=$(yq "(.[\$i].name // \"Run script \${i}\") | trim" "$MERGED_ACTIONS_YAML_FILE" | tr -d '\n')
     # Store mapping: ID -> {name: Original Name, uses: null}
     jq --arg id "$action_id" \
        --arg name "$original_action_name" \
