@@ -108,16 +108,22 @@ for i in $(seq 0 $((count - 1))); do
     # Handle 'uses' step
     action_name_part=$(echo "$action_uses" | cut -d'@' -f1 | sed 's|[/]|-|g')
     action_id="action_${i}_${action_name_part}"
-    # Get the original name, default if not provided, trim whitespace, and remove newlines
-    original_action_name=$(yq "(.[\$i].name // \"Run ${action_uses}\") | trim" "$MERGED_ACTIONS_YAML_FILE" | tr -d '\n')
-    # Store mapping: ID -> {name: Original Name, uses: Action Uses}
-    jq --arg id "$action_id" \
-       --arg name "$original_action_name" \
-       --arg uses_str "$action_uses" \
-       '. + {($id): {"name": $name, "uses": $uses_str}}' \
-       "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+    # Safer name extraction
+    extracted_name=$(yq ".[\$i].name // \"\"" "$MERGED_ACTIONS_YAML_FILE") # Get name or empty string
+    if [ -z "$extracted_name" ]; then
+        # Generate default name if extracted name is empty
+        original_action_name="Run ${action_uses}"
+    else
+        # Use extracted name
+        original_action_name="$extracted_name"
+    fi
+    # Trim and remove newlines from the final name
+    original_action_name=$(echo "$original_action_name" | xargs | tr -d '\n') # xargs trims better
 
-    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
+    # Store mapping: ID -> Index i
+    jq --arg id "$action_id" --argjson index "$i" '. + {($id): $index}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+
+    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use cleaned original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
     echo "        uses: ${action_uses}" >> "$TEMP_WORKFLOW_PATH"
 
@@ -131,15 +137,22 @@ for i in $(seq 0 $((count - 1))); do
   elif [ -n "$action_run" ]; then
     # Handle 'run' step
     action_id="action_${i}_run"
-    # Get the original name, default if not provided, trim whitespace, and remove newlines
-    original_action_name=$(yq "(.[\$i].name // \"Run script \${i}\") | trim" "$MERGED_ACTIONS_YAML_FILE" | tr -d '\n')
-    # Store mapping: ID -> {name: Original Name, uses: null}
-    jq --arg id "$action_id" \
-       --arg name "$original_action_name" \
-       '. + {($id): {"name": $name, "uses": null}}' \
-       "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+     # Safer name extraction
+    extracted_name=$(yq ".[\$i].name // \"\"" "$MERGED_ACTIONS_YAML_FILE") # Get name or empty string
+    if [ -z "$extracted_name" ]; then
+        # Generate default name if extracted name is empty
+        original_action_name="Run script ${i}"
+    else
+        # Use extracted name
+        original_action_name="$extracted_name"
+    fi
+    # Trim and remove newlines from the final name
+    original_action_name=$(echo "$original_action_name" | xargs | tr -d '\n') # xargs trims better
 
-    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use original name in step title
+     # Store mapping: ID -> Index i
+    jq --arg id "$action_id" --argjson index "$i" '. + {($id): $index}' "$ID_NAME_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+
+    echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use cleaned original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
 
     # Add shell if specified, default to bash
@@ -196,27 +209,46 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   echo "::debug::Processing results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
   # Read the potentially non-standard JSON results
   RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
-  # Read the ID->Name map
-  ID_NAME_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
+  # Read the ID->Index map
+  ID_INDEX_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
 
   FINAL_RESULTS_ARRAY="[" # Start building the final JSON array string
   FIRST_ENTRY=true
 
-  # Extract all top-level keys (step IDs) from the raw results content
-  # This requires careful parsing as it's not guaranteed valid JSON/YAML
-  # Using grep to find lines starting with "  step_id:"
-  ALL_STEP_IDS=$(echo "$RAW_RESULTS_CONTENT" | grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' | sed -e 's/^[[:space:]]*//; s/:.*//')
+  # Extract all top-level keys (step IDs) from the raw results content using grep
+  ALL_STEP_IDS=$(echo "$RAW_RESULTS_CONTENT" | grep -E '^[[:space:]]{2}[a-zA-Z0-9_.-]+:' | sed -e 's/^[[:space:]]*//; s/:.*//')
 
   for STEP_ID in $ALL_STEP_IDS; do
-      # Look up info from the map using the current STEP_ID
-      STEP_INFO_JSON=$(echo "$ID_NAME_MAP_JSON" | jq -c --arg id "$STEP_ID" '.[$id] // {}') # Get map entry or empty object
-      ORIGINAL_NAME=$(echo "$STEP_INFO_JSON" | jq -r '.name // null')
-      USES_STR=$(echo "$STEP_INFO_JSON" | jq -r '.uses // null')
+      # Look up the index from the map using the current STEP_ID
+      STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
 
-      # Use mapped name if available, otherwise use the step ID itself
-      DISPLAY_NAME=${ORIGINAL_NAME:-$STEP_ID}
+      if [ -n "$STEP_INDEX" ]; then
+          # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
+          # Extract name/uses safely again here for the final JSON output
+          extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+          if [ -z "$extracted_name" ]; then
+              # Generate default name based on whether it was 'uses' or 'run'
+              extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+              if [ -n "$extracted_uses" ]; then
+                  ORIGINAL_NAME="Run ${extracted_uses}"
+              else
+                  ORIGINAL_NAME="Run script ${STEP_INDEX}"
+              fi
+          else
+               ORIGINAL_NAME="$extracted_name"
+          fi
+          DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
+
+          USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+          # Set uses string, use null if empty
+          JSON_USES=$(echo "$USES_STR" | jq -R -s .)
+      else
+          # Index not found (likely a setup/cleanup step)
+          DISPLAY_NAME="$STEP_ID"
+          JSON_USES="null"
+      fi
+
       JSON_NAME=$(echo "$DISPLAY_NAME" | jq -R -s .) # Escape name for JSON
-      JSON_USES=$(echo "$USES_STR" | jq -R -s .) # Escape uses for JSON (will be "null" if not applicable)
 
 
       # Extract outcome for this STEP_ID using awk for better block handling
