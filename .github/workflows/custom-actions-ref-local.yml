@@ -1,12 +1,12 @@
-name: custom actions ref
+name: custom actions ref local
 
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
   workflow_dispatch:
 
 jobs:
-  run_custom_ref_steps:
+  run_custom_ref_local_steps:
     runs-on: ubuntu-latest
     steps:
       # No checkout needed here unless custom actions require repo files
@@ -17,7 +17,8 @@ jobs:
         id: super_run
         # Use the pre-built Docker image from GHCR
         # Replace ':main' with ':latest' or a specific version tag if needed
-        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
+        # uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
+        uses: ./
         with:
           # Define custom actions to run
           action_list: |

@@ -211,77 +211,62 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
   RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
   # Read the ID->Index map
   ID_INDEX_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
+  # Read raw results content
+  RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
 
-  FINAL_RESULTS_ARRAY="[" # Start building the final JSON array string
-  FIRST_ENTRY=true
+  # Attempt to sanitize the raw results using yq
+  SANITIZED_RESULTS_JSON=$(yq -o=json '.' "$RESULTS_FILE" 2>/dev/null)
 
-  # Extract all top-level keys (step IDs) from the raw results content using grep
-  ALL_STEP_IDS=$(echo "$RAW_RESULTS_CONTENT" | grep -E '^[[:space:]]{2}[a-zA-Z0-9_.-]+:' | sed -e 's/^[[:space:]]*//; s/:.*//')
+  # Array to hold individual JSON step results
+  declare -a json_entries
 
-  for STEP_ID in $ALL_STEP_IDS; do
-      # Look up the index from the map using the current STEP_ID
-      STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
+  # Check if sanitization worked and produced valid JSON
+  if [ -n "$SANITIZED_RESULTS_JSON" ] && echo "$SANITIZED_RESULTS_JSON" | jq -e . > /dev/null; then
+      echo "::debug::Successfully sanitized results using yq. Processing sanitized JSON."
+      ALL_STEP_IDS=$(echo "$SANITIZED_RESULTS_JSON" | jq -r 'keys[] // empty')
 
-      if [ -n "$STEP_INDEX" ]; then
-          # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
-          # Extract name/uses safely again here for the final JSON output
-          extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-          if [ -z "$extracted_name" ]; then
-              # Generate default name based on whether it was 'uses' or 'run'
-              extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-              if [ -n "$extracted_uses" ]; then
-                  ORIGINAL_NAME="Run ${extracted_uses}"
-              else
-                  ORIGINAL_NAME="Run script ${STEP_INDEX}"
-              fi
+      for STEP_ID in $ALL_STEP_IDS; do
+          # Extract outcome and outputs directly from sanitized JSON
+          STEP_OUTCOME=$(echo "$SANITIZED_RESULTS_JSON" | jq -r --arg id "$STEP_ID" '.[$id].outcome // "unknown"')
+          STEP_OUTPUTS_JSON=$(echo "$SANITIZED_RESULTS_JSON" | jq -c --arg id "$STEP_ID" '.[$id].outputs // {}')
+
+          # Look up the index from the map using the current STEP_ID
+          STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
+
+          if [ -n "$STEP_INDEX" ]; then
+              # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
+              extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+              if [ -z "$extracted_name" ]; then
+                  extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+                  if [ -n "$extracted_uses" ]; then ORIGINAL_NAME="Run ${extracted_uses}"; else ORIGINAL_NAME="Run script ${STEP_INDEX}"; fi
+              else ORIGINAL_NAME="$extracted_name"; fi
+              DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
+              USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
           else
-               ORIGINAL_NAME="$extracted_name"
+              # Index not found (likely a setup/cleanup step)
+              DISPLAY_NAME="$STEP_ID"; USES_STR="";
           fi
-          DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
 
-          USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-          # Set uses string, use null if empty
-          JSON_USES=$(echo "$USES_STR" | jq -R -s .)
-      else
-          # Index not found (likely a setup/cleanup step)
-          DISPLAY_NAME="$STEP_ID"
-          JSON_USES="null"
-      fi
+          # Construct JSON object for this step using jq for safety
+          JSON_ENTRY=$(jq -n --arg id "$STEP_ID" --arg name "$DISPLAY_NAME" --arg uses "$USES_STR" --arg outcome "$STEP_OUTCOME" --argjson outputs "$STEP_OUTPUTS_JSON" \
+                             '{id: $id, name: $name, uses: (if $uses == "" then null else $uses end), outcome: $outcome, outputs: $outputs}')
+          json_entries+=("$JSON_ENTRY")
+      done
+  else
+       # Sanitization failed or produced invalid JSON, fallback to empty results
+      echo "::warning::Failed to sanitize results with yq or result was invalid. Setting empty results array."
+      RESULTS_JSON="[]" # Set empty array directly
+      # Skip the rest of the processing for this block
+  fi
 
-      JSON_NAME=$(echo "$DISPLAY_NAME" | jq -R -s .) # Escape name for JSON
+  # Combine all JSON entries into a final JSON array using jq if not already set by fallback
+  if [ -z "$RESULTS_JSON" ]; then # Check if RESULTS_JSON was set by the fallback
+      RESULTS_JSON=$(printf '%s\n' "${json_entries[@]}" | jq -s '.')
+  fi
 
-
-      # Extract outcome for this STEP_ID using awk for better block handling
-      # Find the block starting with "  step_id:" and ending with "  },"
-      # Within that block, find the line "outcome: value"
-      STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | awk -v step_id="^  ${STEP_ID}:" '/^\s*}/ { if(p) p=0 } $0 ~ step_id { p=1 } p && /outcome:/ { print $2; exit }' | sed 's/,*$//')
-      # Default outcome if not found
-      STEP_OUTCOME=${STEP_OUTCOME:-unknown}
-
-      # Extract outputs object string for this STEP_ID
-      # This is complex with shell tools, find the 'outputs: {' line and extract until the matching '}'
-      # Using awk for block extraction might be better, but let's try grep/sed first (might be fragile)
-      # This extracts lines between "outputs: {" and the next "}," or "}" at the same indentation level
-      OUTPUTS_STR=$(echo "$RAW_RESULTS_CONTENT" | sed -n "/^  ${STEP_ID}:/,/^\s*}/p" | sed -n '/outputs: {/,/}/p' | sed '1d;$d' | sed 's/^    //') # Basic attempt, likely needs refinement
-      # Try to format the extracted outputs as valid JSON
-      STEP_OUTPUTS_JSON=$(echo "{${OUTPUTS_STR}}" | jq -c . 2>/dev/null || echo '{}')
-
-      # Append to the final array string
-      if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else FINAL_RESULTS_ARRAY+=","; fi
-      # Add the 'uses' field
-      JSON_ENTRY=$(printf '{"id":"%s","name":%s,"uses":%s,"outcome":"%s","outputs":%s}' \
-          "$STEP_ID" "$JSON_NAME" "$JSON_USES" "$STEP_OUTCOME" "$STEP_OUTPUTS_JSON")
-      FINAL_RESULTS_ARRAY+="$JSON_ENTRY"
-  done
-
-  # No need to add collect_results_step manually, it should be captured by iterating ALL_STEP_IDS
-
-  FINAL_RESULTS_ARRAY+="]" # Close the array
-
-  # Validate the constructed JSON array
-  if echo "$FINAL_RESULTS_ARRAY" | jq -e . > /dev/null; then
-      RESULTS_JSON="$FINAL_RESULTS_ARRAY"
-      echo "::debug::Successfully parsed and formatted results."
+  # Final validation (only if not fallback)
+  if [ "$RESULTS_JSON" != "[]" ] && echo "$RESULTS_JSON" | jq -e . > /dev/null; then
+      echo "::debug::Successfully processed results into final JSON array."
   else
       echo "::error::Failed to construct valid final results JSON. Falling back to empty array."
       cat "$RESULTS_FILE" # Show raw results for debugging
