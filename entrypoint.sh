@@ -184,107 +184,83 @@ cat << EOF >> "$TEMP_WORKFLOW_PATH"
         if: always() # Ensure this runs even if previous steps fail
         shell: bash
         run: |
-          echo "Writing raw results to ${RESULTS_FILE}..."
-          # Use printf; subsequent processing will parse this potentially non-standard JSON
-          printf '%s\n' "\${{ toJSON(steps) }}" > "${RESULTS_FILE}"
-          echo "Raw results written."
+          echo "Constructing results JSON array..." >&2 # Write debug to stderr
+          RESULTS_JSON_OUTPUT="[" # Start building the string
+          # Load the ID->Name map from the environment variable
+          declare -A id_name_map # Use associative array
+          while IFS='=' read -r key value; do
+              key=\$(echo "\$key" | sed 's/^\"//;s/\"\$//')
+              value=\$(echo "\$value" | sed 's/^\"//;s/\"\$//')
+              id_name_map["\$key"]="\$value"
+          done < <(echo "\$ID_NAME_MAP_JSON" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"')
+
+          FIRST_STEP=true
+          # Iterate through the known step IDs from the map keys
+          for STEP_ID in "\${!id_name_map[@]}"; do
+            ORIGINAL_NAME=\${id_name_map[\$STEP_ID]}
+            STEP_OUTCOME="\${{ steps.\${STEP_ID}.outcome }}"
+            STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'
+            STEP_OUTPUTS_JSON=\$(echo "\$STEP_OUTPUTS_RAW" | jq -c . 2>/dev/null || echo '{}')
+            JSON_NAME=\$(echo "\$ORIGINAL_NAME" | jq -R -s .)
+
+            if [ "\$FIRST_STEP" = true ]; then FIRST_STEP=false; else RESULTS_JSON_OUTPUT+=","; fi
+            JSON_ENTRY=\$(printf '{"id":"%s","name":%s,"outcome":"%s","outputs":%s}' "\$STEP_ID" "\$JSON_NAME" "\$STEP_OUTCOME" "\$STEP_OUTPUTS_JSON")
+            RESULTS_JSON_OUTPUT+="\${JSON_ENTRY}"
+          done
+
+          # Add the collect_results_step itself
+          STEP_ID='collect_results_step'
+          STEP_OUTCOME="\${{ steps.\${STEP_ID}.outcome }}"
+          STEP_OUTPUTS_RAW='\${{ toJSON(steps.\${STEP_ID}.outputs) }}'
+          STEP_OUTPUTS_JSON=\$(echo "\$STEP_OUTPUTS_RAW" | jq -c . 2>/dev/null || echo '{}')
+          if [ "\$FIRST_STEP" = true ]; then FIRST_STEP=false; else RESULTS_JSON_OUTPUT+=","; fi
+          JSON_ENTRY=\$(printf '{"id":"%s","name":"%s","outcome":"%s","outputs":%s}' "\$STEP_ID" "Collect Results" "\$STEP_OUTCOME" "\$STEP_OUTPUTS_JSON")
+          RESULTS_JSON_OUTPUT+="\${JSON_ENTRY}"
+
+          RESULTS_JSON_OUTPUT+="]"
+          echo "Finished constructing results JSON." >&2 # Write debug to stderr
+          # Print the final JSON array to stdout
+          echo "\$RESULTS_JSON_OUTPUT"
 EOF
 
 echo "::debug::Generated workflow content:"
 cat "$TEMP_WORKFLOW_PATH"
 
-# Execute Workflow with act
+# Execute Workflow with act and capture stdout
 echo "::group::Running act..."
-# Run 'act' targeting the specific job.
-# Use --container-architecture linux/amd64 for broader compatibility if needed.
-# Use --bind to mount the workspace if actions need access to checked-out code.
-# Use --secret-file if secrets are needed (requires careful handling).
-# The '--output' flag in act is complex; writing to a file from within the workflow is more reliable here.
-act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job dynamic_job --bind --directory "$GITHUB_WORKSPACE" --container-architecture linux/amd64
-# Consider adding error handling for 'act' execution itself
+ACT_STDOUT=$(act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job dynamic_job --bind --directory "$GITHUB_WORKSPACE" --container-architecture linux/amd64 2>&1)
+ACT_EXIT_CODE=$?
+echo "$ACT_STDOUT" # Print act output to logs
 echo "::endgroup::"
 
-# Process the run results
-if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
-  echo "::debug::Processing results from ${RESULTS_FILE} and ID->Name map from ${ID_NAME_MAP_FILE}"
-  # Read the potentially non-standard JSON results
-  RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
-  # Read the ID->Index map
-  ID_INDEX_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
-  # Read raw results content
-  RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
-
-  # Attempt to sanitize the raw results using yq
-  SANITIZED_RESULTS_JSON=$(yq -o=json '.' "$RESULTS_FILE" 2>/dev/null)
-
-  # Array to hold individual JSON step results
-  declare -a json_entries
-
-  # Check if sanitization worked and produced valid JSON
-  if [ -n "$SANITIZED_RESULTS_JSON" ] && echo "$SANITIZED_RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Successfully sanitized results using yq. Processing sanitized JSON."
-      ALL_STEP_IDS=$(echo "$SANITIZED_RESULTS_JSON" | jq -r 'keys[] // empty')
-
-      for STEP_ID in $ALL_STEP_IDS; do
-          # Extract outcome and outputs directly from sanitized JSON
-          STEP_OUTCOME=$(echo "$SANITIZED_RESULTS_JSON" | jq -r --arg id "$STEP_ID" '.[$id].outcome // "unknown"')
-          STEP_OUTPUTS_JSON=$(echo "$SANITIZED_RESULTS_JSON" | jq -c --arg id "$STEP_ID" '.[$id].outputs // {}')
-
-          # Look up the index from the map using the current STEP_ID
-          STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
-
-          if [ -n "$STEP_INDEX" ]; then
-              # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
-              extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-              if [ -z "$extracted_name" ]; then
-                  extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-                  if [ -n "$extracted_uses" ]; then ORIGINAL_NAME="Run ${extracted_uses}"; else ORIGINAL_NAME="Run script ${STEP_INDEX}"; fi
-              else ORIGINAL_NAME="$extracted_name"; fi
-              DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
-              USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-          else
-              # Index not found (likely a setup/cleanup step)
-              DISPLAY_NAME="$STEP_ID"; USES_STR="";
-          fi
-
-          # Construct JSON object for this step using jq for safety
-          JSON_ENTRY=$(jq -n --arg id "$STEP_ID" --arg name "$DISPLAY_NAME" --arg uses "$USES_STR" --arg outcome "$STEP_OUTCOME" --argjson outputs "$STEP_OUTPUTS_JSON" \
-                             '{id: $id, name: $name, uses: (if $uses == "" then null else $uses end), outcome: $outcome, outputs: $outputs}')
-          json_entries+=("$JSON_ENTRY")
-      done
-  else
-       # Sanitization failed or produced invalid JSON, fallback to empty results
-      echo "::warning::Failed to sanitize results with yq or result was invalid. Setting empty results array."
-      RESULTS_JSON="[]" # Set empty array directly
-      # Skip the rest of the processing for this block
-  fi
-
-  # Combine all JSON entries into a final JSON array using jq if not already set by fallback
-  if [ -z "$RESULTS_JSON" ]; then # Check if RESULTS_JSON was set by the fallback
-      RESULTS_JSON=$(printf '%s\n' "${json_entries[@]}" | jq -s '.')
-  fi
-
-  # Final validation (only if not fallback)
-  if [ "$RESULTS_JSON" != "[]" ] && echo "$RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Successfully processed results into final JSON array."
-  else
-      echo "::error::Failed to construct valid final results JSON. Falling back to empty array."
-      cat "$RESULTS_FILE" # Show raw results for debugging
-      RESULTS_JSON="[]"
-  fi
-
-else
-  if [ ! -f "$RESULTS_FILE" ]; then
-      echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
-  fi
-   if [ ! -f "$ID_NAME_MAP_FILE" ]; then
-      echo "::warning::ID->Name map file ${ID_NAME_MAP_FILE} not found."
-  fi
-  echo "::warning::Setting empty results due to missing files."
-  RESULTS_JSON="[]" # Use empty array for consistency
+# Check act exit code (optional but recommended)
+if [ $ACT_EXIT_CODE -ne 0 ]; then
+    echo "::error::'act' command failed with exit code ${ACT_EXIT_CODE}."
+    # Decide whether to exit or try to process partial results
+    # For now, we'll try to process potential output
 fi
-# Remove the ID map file as it's no longer needed after workflow generation
-rm -f "$ID_NAME_MAP_FILE"
+
+# Process the run results from act's stdout
+echo "::debug::Processing results from act stdout..."
+# Extract the JSON array printed by the Collect Results step
+# Look for lines starting with '[' and ending with ']'
+RESULTS_JSON=$(echo "$ACT_STDOUT" | grep -E '^\[' | sed -n '1p') # Get the first line starting with [
+
+if [ -n "$RESULTS_JSON" ]; then
+    # Validate the extracted JSON
+    if echo "$RESULTS_JSON" | jq -e . > /dev/null; then
+        echo "::debug::Successfully extracted and validated results JSON from act stdout."
+    else
+        echo "::error::Extracted results JSON from act stdout is INVALID. Content: $RESULTS_JSON"
+        RESULTS_JSON="[]" # Fallback to empty array
+    fi
+else
+    echo "::warning::Could not find results JSON array in act stdout. Setting empty results."
+    RESULTS_JSON="[]" # Use empty array for consistency
+fi
+
+# Cleanup temporary files (ID map file is still needed if we want name/uses, but let's remove it for now as the Collect step handles it)
+# rm -f "$ID_NAME_MAP_FILE" # Keep map file if needed for future refinement
 
 
 # Set Action Output
