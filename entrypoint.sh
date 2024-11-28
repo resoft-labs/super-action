@@ -54,8 +54,22 @@ if [ -n "$INPUT_PRESETS" ]; then
     if [ -f "$preset_file" ]; then
       echo "::debug::Adding preset: $preset_name from file $preset_file"
       # Convert preset JSON to YAML and merge it into the sequence
-      yq eval-all '. as $item ireduce ([]; . * $item)' "$MERGED_ACTIONS_YAML_FILE" <(yq -P '.' "$preset_file") > /tmp/merged_temp.yaml
-      mv /tmp/merged_temp.yaml "$MERGED_ACTIONS_YAML_FILE"
+      # Add robust checks around the merge and move operation
+      if yq eval-all '. as $item ireduce ([]; . * $item)' "$MERGED_ACTIONS_YAML_FILE" <(yq -P '.' "$preset_file") > /tmp/merged_temp.yaml; then
+        if [ -f "/tmp/merged_temp.yaml" ]; then
+          if [ -e "$MERGED_ACTIONS_YAML_FILE" ] && [ -d "$MERGED_ACTIONS_YAML_FILE" ]; then
+            echo "::error::Target merge file ${MERGED_ACTIONS_YAML_FILE} is unexpectedly a directory."
+            exit 1
+          fi
+          mv /tmp/merged_temp.yaml "$MERGED_ACTIONS_YAML_FILE"
+        else
+          echo "::error::Temporary merge file /tmp/merged_temp.yaml was not created after yq preset processing for ${preset_name}."
+          exit 1
+        fi
+      else
+        echo "::error::yq command failed during preset processing for ${preset_name}."
+        exit 1
+      fi
     else
       echo "::warning::Preset file not found for requested preset: $preset_name (expected at $preset_file)"
     fi
@@ -73,8 +87,22 @@ if [ -n "$INPUT_ACTION_LIST" ]; then
   fi
   echo "::debug::Adding custom actions from action_list..."
   # Merge the custom action list sequence with the presets sequence
-  yq eval-all '. as $item ireduce ([]; . * $item)' "$MERGED_ACTIONS_YAML_FILE" "$ACTION_LIST_FILE" > /tmp/merged_temp.yaml
-  mv /tmp/merged_temp.yaml "$MERGED_ACTIONS_YAML_FILE"
+  # Add robust checks around the merge and move operation
+  if yq eval-all '. as $item ireduce ([]; . * $item)' "$MERGED_ACTIONS_YAML_FILE" "$ACTION_LIST_FILE" > /tmp/merged_temp.yaml; then
+    if [ -f "/tmp/merged_temp.yaml" ]; then
+      if [ -e "$MERGED_ACTIONS_YAML_FILE" ] && [ -d "$MERGED_ACTIONS_YAML_FILE" ]; then
+         echo "::error::Target merge file ${MERGED_ACTIONS_YAML_FILE} is unexpectedly a directory."
+         exit 1
+      fi
+      mv /tmp/merged_temp.yaml "$MERGED_ACTIONS_YAML_FILE"
+    else
+       echo "::error::Temporary merge file /tmp/merged_temp.yaml was not created after yq custom action processing."
+       exit 1
+    fi
+  else
+    echo "::error::yq command failed during custom action processing."
+    exit 1
+  fi
 fi
 
 echo "::debug::Final merged actions YAML:"
@@ -150,7 +178,7 @@ for i in $(seq 0 $((count - 1))); do
     original_action_name=$(echo "$original_action_name" | xargs | tr -d '\n') # xargs trims better
 
      # Store mapping: ID -> Index i
-    jq --arg id "$action_id" --argjson index "$i" '. + {($id): $index}' "$ID_INDEX_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_NAME_MAP_FILE"
+    jq --arg id "$action_id" --argjson index "$i" '. + {($id): $index}' "$ID_INDEX_MAP_FILE" > /tmp/id_map_temp.json && mv /tmp/id_map_temp.json "$ID_INDEX_MAP_FILE"
 
     echo "      - name: ${original_action_name} (${action_id})" >> "$TEMP_WORKFLOW_PATH" # Use cleaned original name in step title
     echo "        id: ${action_id}" >> "$TEMP_WORKFLOW_PATH"
@@ -204,82 +232,100 @@ act push -P ubuntu-latest=-self-hosted --workflows "$TEMP_WORKFLOW_PATH" --job d
 # Consider adding error handling for 'act' execution itself
 echo "::endgroup::"
 
-# Process the run results
-if [ -f "$RESULTS_FILE" ] && [ -f "$ID_NAME_MAP_FILE" ]; then
-  echo "::debug::Processing results from ${RESULTS_FILE} and ID->Index map from ${ID_NAME_MAP_FILE}"
+# Process the run results using robust shell parsing
+if [ -f "$RESULTS_FILE" ] && [ -f "$ID_INDEX_MAP_FILE" ]; then
+  echo "::debug::Processing results from ${RESULTS_FILE} and ID->Index map from ${ID_INDEX_MAP_FILE}"
   # Read the ID->Index map
-  ID_INDEX_MAP_JSON=$(cat "$ID_NAME_MAP_FILE")
-
-  # Attempt to sanitize the raw results using yq
-  SANITIZED_RESULTS_JSON=$(yq -o=json '.' "$RESULTS_FILE" 2>/dev/null)
+  ID_INDEX_MAP_JSON=$(cat "$ID_INDEX_MAP_FILE")
+  # Read raw results content
+  RAW_RESULTS_CONTENT=$(cat "$RESULTS_FILE")
 
   # Array to hold individual JSON step results
   declare -a json_entries
 
-  # Check if sanitization worked and produced valid JSON
-  if [ -n "$SANITIZED_RESULTS_JSON" ] && echo "$SANITIZED_RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Successfully sanitized results using yq. Processing sanitized JSON."
-      ALL_STEP_IDS=$(echo "$SANITIZED_RESULTS_JSON" | jq -r 'keys[] // empty')
+  # Use improved shell parsing
+  echo "::debug::Parsing raw results using shell commands..."
+  ALL_STEP_IDS=$(echo "$RAW_RESULTS_CONTENT" | grep -E '^[[:space:]]{2}[a-zA-Z0-9_.-]+:' | sed -e 's/^[[:space:]]*//; s/:.*//')
 
-      for STEP_ID in $ALL_STEP_IDS; do
-          # Extract outcome and outputs directly from sanitized JSON
-          STEP_OUTCOME=$(echo "$SANITIZED_RESULTS_JSON" | jq -r --arg id "$STEP_ID" '.[$id].outcome // "unknown"')
-          STEP_OUTPUTS_JSON=$(echo "$SANITIZED_RESULTS_JSON" | jq -c --arg id "$STEP_ID" '.[$id].outputs // {}')
+  for STEP_ID in $ALL_STEP_IDS; do
+      # Look up the index from the map using the current STEP_ID
+      STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
 
-          # Look up the index from the map using the current STEP_ID
-          STEP_INDEX=$(echo "$ID_INDEX_MAP_JSON" | jq -r --arg id "$STEP_ID" '.[$id] // empty')
-
-          if [ -n "$STEP_INDEX" ]; then
-              # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
-              extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-              if [ -z "$extracted_name" ]; then
-                  extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-                  if [ -n "$extracted_uses" ]; then ORIGINAL_NAME="Run ${extracted_uses}"; else ORIGINAL_NAME="Run script ${STEP_INDEX}"; fi
-              else ORIGINAL_NAME="$extracted_name"; fi
-              DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
-              USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
-          else
-              # Index not found (likely a setup/cleanup step)
-              DISPLAY_NAME="$STEP_ID"; USES_STR="";
-          fi
-
-          # Construct JSON object for this step using jq for safety
-          JSON_ENTRY=$(jq -n --arg id "$STEP_ID" --arg name "$DISPLAY_NAME" --arg uses "$USES_STR" --arg outcome "$STEP_OUTCOME" --argjson outputs "$STEP_OUTPUTS_JSON" \
-                             '{id: $id, name: $name, uses: (if $uses == "" then null else $uses end), outcome: $outcome, outputs: $outputs}')
-          json_entries+=("$JSON_ENTRY")
-      done
-      # Combine all JSON entries into a final JSON array using jq
-      RESULTS_JSON=$(printf '%s\n' "${json_entries[@]}" | jq -s '.')
-  else
-       # Sanitization failed or produced invalid JSON, fallback to empty results
-      echo "::warning::Failed to sanitize results with yq or result was invalid. Setting empty results array."
-      RESULTS_JSON="[]" # Set empty array directly
-  fi
-
-  # Final validation (only if not fallback)
-  if [ "$RESULTS_JSON" != "[]" ] && echo "$RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Successfully processed results into final JSON array."
-  else
-      # If RESULTS_JSON is still [], the warning was already printed.
-      # If it's not [] but invalid, print error.
-      if [ "$RESULTS_JSON" != "[]" ]; then
-          echo "::error::Constructed results JSON is INVALID. Content: $RESULTS_JSON"
-          RESULTS_JSON="[]" # Fallback to empty array
+      if [ -n "$STEP_INDEX" ]; then
+          # Index found, get original name and uses from MERGED_ACTIONS_YAML_FILE
+          extracted_name=$(yq ".[\$STEP_INDEX].name // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+          if [ -z "$extracted_name" ]; then
+              extracted_uses=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+              if [ -n "$extracted_uses" ]; then ORIGINAL_NAME="Run ${extracted_uses}"; else ORIGINAL_NAME="Run script ${STEP_INDEX}"; fi
+          else ORIGINAL_NAME="$extracted_name"; fi
+          DISPLAY_NAME=$(echo "$ORIGINAL_NAME" | xargs | tr -d '\n') # Clean the final name
+          USES_STR=$(yq ".[\$STEP_INDEX].uses // \"\"" "$MERGED_ACTIONS_YAML_FILE")
+      else
+          # Index not found (likely a setup/cleanup step)
+          DISPLAY_NAME="$STEP_ID"; USES_STR="";
       fi
+
+      # Improved outcome extraction using awk: Find block starting with exact ID, then find first outcome: line before next block
+      STEP_OUTCOME=$(echo "$RAW_RESULTS_CONTENT" | awk -v sid="$STEP_ID" '
+          BEGIN { found_id=0; outcome="unknown" }
+          $0 == ("  " sid ":") { found_id=1; next } # Match exact start line
+          found_id && /^[[:space:]]{2}[a-zA-Z0-9_.-]+:/ { found_id=0 } # Stop if next step ID is found
+          found_id && /^[[:space:]]{4}outcome:/ { outcome=$2; sub(/,$/,"",outcome); found_id=0 } # Found outcome, stop searching this block
+          END { print outcome }
+      ')
+      STEP_OUTCOME=${STEP_OUTCOME:-unknown} # Default if awk fails
+
+      # Improved outputs extraction using awk: Find block, find outputs: {, print until matching }
+      OUTPUTS_STR=$(echo "$RAW_RESULTS_CONTENT" | awk -v sid="$STEP_ID" '
+          BEGIN { p=0; brace_level=0; in_step=0 }
+          $0 == ("  " sid ":") { in_step=1; next } # Match exact start line
+          in_step && /^[[:space:]]{2}[a-zA-Z0-9_.-]+:/ { in_step=0 } # Stop if next step ID is found
+          in_step && /^[[:space:]]{4}outputs: \{/ { p=1; brace_level=1; next }
+          p {
+              # Count braces accurately on each line
+              open_braces = gsub(/{/, "{");
+              close_braces = gsub(/}/, "}");
+              brace_level += open_braces;
+              brace_level -= close_braces;
+              if (brace_level > 0 || (brace_level == 0 && open_braces > 0)) { # Print line if inside or the closing brace line
+                 print substr($0, 7) # Print content inside outputs, removing leading spaces (adjust substr index if needed)
+              }
+              if (brace_level <= 0) { p=0 } # Stop when brace level is 0 or less
+          }
+      ')
+      # Try to format the extracted outputs as valid JSON
+      STEP_OUTPUTS_JSON=$(echo "{${OUTPUTS_STR}}" | jq -c . 2>/dev/null || echo '{}')
+
+      # Construct JSON object for this step using jq for safety
+      JSON_ENTRY=$(jq -n --arg id "$STEP_ID" --arg name "$DISPLAY_NAME" --arg uses "$USES_STR" --arg outcome "$STEP_OUTCOME" --argjson outputs "$STEP_OUTPUTS_JSON" \
+                         '{id: $id, name: $name, uses: (if $uses == "" then null else $uses end), outcome: $outcome, outputs: $outputs}')
+      json_entries+=("$JSON_ENTRY")
+  done
+
+  # Combine all JSON entries into a final JSON array using jq
+  RESULTS_JSON=$(printf '%s\n' "${json_entries[@]}" | jq -s '.')
+
+  # Final validation
+  if echo "$RESULTS_JSON" | jq -e . > /dev/null; then
+      echo "::debug::Successfully processed results into final JSON array using shell parsing."
+  else
+      echo "::error::Constructed results JSON is INVALID after shell parsing. Falling back to empty array."
+      cat "$RESULTS_FILE" # Show raw results for debugging
+      RESULTS_JSON="[]"
   fi
 
 else
   if [ ! -f "$RESULTS_FILE" ]; then
       echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
   fi
-   if [ ! -f "$ID_NAME_MAP_FILE" ]; then
+   if [ ! -f "$ID_INDEX_MAP_FILE" ]; then
       echo "::warning::ID->Name map file ${ID_NAME_MAP_FILE} not found."
   fi
   echo "::warning::Setting empty results due to missing files."
   RESULTS_JSON="[]" # Use empty array for consistency
 fi
 # Remove the ID map file as it's no longer needed after workflow generation
-rm -f "$ID_NAME_MAP_FILE"
+rm -f "$ID_INDEX_MAP_FILE"
 
 
 # Set Action Output
