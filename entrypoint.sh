@@ -305,16 +305,18 @@ if [ -f "$RESULTS_FILE" ] && [ -f "$ID_INDEX_MAP_FILE" ]; then
   # Combine all JSON entries into a final JSON array using jq
   RESULTS_JSON=$(printf '%s\n' "${json_entries[@]}" | jq -s '.')
 
-  # Final validation
-  if echo "$RESULTS_JSON" | jq -e . > /dev/null; then
-      echo "::debug::Successfully processed results into final JSON array using shell parsing."
-  else
+  # Corrected Final validation logic
+  if ! echo "$RESULTS_JSON" | jq -e . > /dev/null; then
       echo "::error::Constructed results JSON is INVALID after shell parsing. Falling back to empty array."
       cat "$RESULTS_FILE" # Show raw results for debugging
       RESULTS_JSON="[]"
-  fi
+  else
+      echo "::debug::Successfully processed results into final JSON array using shell parsing."
+  fi # This fi closes the validation if
 
+# This else corresponds to the top-level file check
 else
+  # This block handles cases where results file or map file are missing
   if [ ! -f "$RESULTS_FILE" ]; then
       echo "::warning::Results file ${RESULTS_FILE} not found after act execution."
   fi
