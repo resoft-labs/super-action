@@ -203,6 +203,5 @@ def main():
         print(f"::error::Failed to serialize final results to JSON: {e}", file=sys.stderr)
         print("[]") # Output empty array on final error
 
-
 if __name__ == "__main__":
     main()

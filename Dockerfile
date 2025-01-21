@@ -39,8 +39,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
 RUN curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | bash -s -- -b /usr/local/bin
 
 # Copy necessary files
-COPY entrypoint.py /entrypoint.py # Use the Python entrypoint
-COPY parse_results.py /usr/local/bin/parse_results.py # Copy parser script
+COPY entrypoint.py /entrypoint.py
+COPY parse_results.py /usr/local/bin/parse_results.py
 COPY presets /presets
 
 # Make scripts executable
