@@ -10,11 +10,13 @@ import json
 import yaml
 import re
 import io
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 def _extract_outcome(step_lines: List[str]) -> str:
     """Extracts the outcome value from lines belonging to a single step."""
-    outcome_regex = re.compile(r'^\s{4}outcome:\s*(\w+),?')
+    # Regex to find outcome lines (e.g., "    outcome: success,")
+    # Makes value capturing non-greedy and handles optional comma
+    outcome_regex = re.compile(r'^\s{4}outcome:\s*(\S+?)\s*,?$')
     for line in step_lines:
         match = outcome_regex.match(line)
         if match:
@@ -22,44 +24,63 @@ def _extract_outcome(step_lines: List[str]) -> str:
     return "unknown"
 
 def _extract_outputs_json(step_lines: List[str]) -> Dict[str, Any]:
-    """Extracts and parses the outputs block from lines belonging to a single step."""
+    """
+    Extracts and parses the outputs block from lines belonging to a single step.
+    Handles potentially non-standard JSON/YAML format within the block.
+    """
     outputs_start_regex = re.compile(r'^\s{4}outputs:\s*\{')
     in_outputs_block = False
-    outputs_str_lines = []
+    outputs_content_lines = []
     brace_level = 0
 
     for line in step_lines:
+        stripped_line = line.strip()
         if outputs_start_regex.match(line):
             in_outputs_block = True
-            # Handle empty inline object: "outputs: {}"
-            if line.strip().endswith('{}'):
+            # Check for empty inline object: "outputs: {}"
+            if stripped_line.endswith('{}'):
                 return {}
             brace_level = 1
-            continue # Skip the starting line itself
+            continue # Skip the starting line
 
         if in_outputs_block:
-            # Track braces to find the end
+            # Add line content relevant for parsing (strip leading spaces)
+            # Assuming content starts at indent level 6+
+            content_line = line[6:] if len(line) > 6 else stripped_line
+            outputs_content_lines.append(content_line)
+
+            # Track braces to find the end accurately
             brace_level += line.count('{')
             brace_level -= line.count('}')
-
-            # Add line content (removing outer indentation) if still inside
-            if brace_level > 0 or (brace_level == 0 and line.count('{') > 0):
-                 # Assuming 6 spaces indent for content inside outputs: {}
-                 outputs_str_lines.append(line[6:] if len(line) > 6 else line.strip())
 
             if brace_level <= 0:
                 break # End of block
 
-    # Attempt to parse the collected outputs string
-    outputs_str = "".join(outputs_str_lines)
-    if not outputs_str.strip():
+    # Join lines and attempt to parse as JSON (most common)
+    outputs_str = "".join(outputs_content_lines).strip()
+    if not outputs_str:
         return {}
+
+    # Add braces back for JSON parsing
+    json_str_to_parse = "{" + outputs_str + "}"
+
     try:
-        # Add braces back and parse as JSON
-        return json.loads("{" + outputs_str + "}")
+        # First attempt: strict JSON
+        return json.loads(json_str_to_parse)
     except json.JSONDecodeError:
-        print(f"::warning::Could not parse outputs block: {{{outputs_str}}}", file=sys.stderr)
-        return {} # Default to empty dict on error
+        # Second attempt: Treat as YAML (more lenient)
+        try:
+            # yq/python yaml might handle unquoted keys/strings
+            parsed_yaml = yaml.safe_load(json_str_to_parse)
+            if isinstance(parsed_yaml, dict):
+                return parsed_yaml
+            else:
+                 # If YAML parsing results in non-dict, return empty
+                 print(f"::warning::Parsed outputs YAML was not a dictionary: {json_str_to_parse}", file=sys.stderr)
+                 return {}
+        except yaml.YAMLError as e:
+            print(f"::warning::Could not parse outputs block as JSON or YAML: {json_str_to_parse}. Error: {e}", file=sys.stderr)
+            return {} # Default to empty dict on error
 
 def parse_raw_results(raw_content: str) -> Dict[str, Dict[str, Any]]:
     """
@@ -76,8 +97,8 @@ def parse_raw_results(raw_content: str) -> Dict[str, Dict[str, Any]]:
     steps_data: Dict[str, Dict[str, Any]] = {}
     current_step_lines: List[str] = []
     current_step_id: Optional[str] = None
-    # Regex to find step ID lines (e.g., "  step_id:")
-    step_id_regex = re.compile(r'^\s{2}([a-zA-Z0-9_.-]+):')
+    # Regex to find step ID lines (e.g., "  step_id:") - ensure it matches start of line
+    step_id_regex = re.compile(r'^\s{2}([a-zA-Z0-9_.-]+):\s*\{?$') # Allow optional opening brace
 
     for line in io.StringIO(raw_content):
         step_match = step_id_regex.match(line)
@@ -90,11 +111,13 @@ def parse_raw_results(raw_content: str) -> Dict[str, Dict[str, Any]]:
 
             # Start new step
             current_step_id = step_match.group(1)
-            current_step_lines = [line] # Start collecting lines for the new step
-            if current_step_id not in steps_data: # Initialize if not seen
+            # Reset lines, DO NOT include the ID line itself in step_lines
+            current_step_lines = []
+            # Initialize entry if first time seeing this ID
+            if current_step_id not in steps_data:
                  steps_data[current_step_id] = {'outcome': 'unknown', 'outputs': {}}
         elif current_step_id:
-            # Continue collecting lines for the current step
+            # Continue collecting lines *within* the current step block
             current_step_lines.append(line)
 
     # Process the very last step's collected lines
@@ -158,11 +181,16 @@ def main():
     all_step_ids = list(parsed_steps_data.keys()) # Process all steps found in results
 
     for step_id in all_step_ids:
+        # Skip the internal collect results step
+        if step_id == 'collect_results_step':
+            continue
+
         step_data = parsed_steps_data[step_id]
         step_index = id_index_map.get(step_id) # Returns None if ID not in map
 
         name = step_id # Default name is the step ID
         uses = None
+        run_script = None
 
         if step_index is not None:
             try:
@@ -171,17 +199,19 @@ def main():
                     if isinstance(original_action, dict):
                         extracted_name = original_action.get('name')
                         extracted_uses = original_action.get('uses')
+                        extracted_run = original_action.get('run')
 
                         # Determine display name
                         if extracted_name:
                             name = str(extracted_name).strip()
                         elif extracted_uses: # Generate default name if needed
                             name = f"Run {extracted_uses}".strip()
-                        elif original_action.get('run'):
+                        elif extracted_run:
                             name = f"Run script {step_index}".strip()
                         # else: keep step_id as name if no info found
 
                         uses = extracted_uses # Will be None if not a 'uses' step
+                        run_script = extracted_run # Will be None if not a 'run' step
                 else:
                      print(f"::warning::Index {step_index} for step {step_id} out of bounds for merged_actions (len={len(merged_actions)}).", file=sys.stderr)
             except Exception as e:
@@ -192,6 +222,7 @@ def main():
             "id": step_id,
             "name": name,
             "uses": uses,
+            "run": run_script, # Add the run field
             "outcome": step_data.get('outcome', 'unknown'),
             "outputs": step_data.get('outputs', {})
         })
@@ -202,6 +233,7 @@ def main():
     except Exception as e:
         print(f"::error::Failed to serialize final results to JSON: {e}", file=sys.stderr)
         print("[]") # Output empty array on final error
+
 
 if __name__ == "__main__":
     main()
