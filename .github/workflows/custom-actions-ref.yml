@@ -23,7 +23,8 @@ jobs:
           action_list: |
             - name: Simple Echo
               run: echo "Running a custom echo command."
-            - uses: actions/setup-python@v5
+            - name: Set up Python
+              uses: actions/setup-python@v5
               with:
                 python-version: '3.12'
             - name: Show Python Version

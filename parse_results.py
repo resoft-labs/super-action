@@ -7,84 +7,14 @@ representation of the GitHub Actions 'steps' context.
 
 import sys
 import json
-import yaml
+import yaml # Requires PyYAML library
 import re
 import io
 from typing import Dict, Any, Optional, List
 
-def _extract_outcome(step_lines: List[str]) -> str:
-    """Extracts the outcome value from lines belonging to a single step."""
-    # Regex to find outcome lines (e.g., "    outcome: success,")
-    # Makes value capturing non-greedy and handles optional comma
-    outcome_regex = re.compile(r'^\s{4}outcome:\s*(\S+?)\s*,?$')
-    for line in step_lines:
-        match = outcome_regex.match(line)
-        if match:
-            return match.group(1)
-    return "unknown"
-
-def _extract_outputs_json(step_lines: List[str]) -> Dict[str, Any]:
+def parse_raw_results_with_yaml(raw_content: str) -> Dict[str, Dict[str, Any]]:
     """
-    Extracts and parses the outputs block from lines belonging to a single step.
-    Handles potentially non-standard JSON/YAML format within the block.
-    """
-    outputs_start_regex = re.compile(r'^\s{4}outputs:\s*\{')
-    in_outputs_block = False
-    outputs_content_lines = []
-    brace_level = 0
-
-    for line in step_lines:
-        stripped_line = line.strip()
-        if outputs_start_regex.match(line):
-            in_outputs_block = True
-            # Check for empty inline object: "outputs: {}"
-            if stripped_line.endswith('{}'):
-                return {}
-            brace_level = 1
-            continue # Skip the starting line
-
-        if in_outputs_block:
-            # Add line content relevant for parsing (strip leading spaces)
-            # Assuming content starts at indent level 6+
-            content_line = line[6:] if len(line) > 6 else stripped_line
-            outputs_content_lines.append(content_line)
-
-            # Track braces to find the end accurately
-            brace_level += line.count('{')
-            brace_level -= line.count('}')
-
-            if brace_level <= 0:
-                break # End of block
-
-    # Join lines and attempt to parse as JSON (most common)
-    outputs_str = "".join(outputs_content_lines).strip()
-    if not outputs_str:
-        return {}
-
-    # Add braces back for JSON parsing
-    json_str_to_parse = "{" + outputs_str + "}"
-
-    try:
-        # First attempt: strict JSON
-        return json.loads(json_str_to_parse)
-    except json.JSONDecodeError:
-        # Second attempt: Treat as YAML (more lenient)
-        try:
-            # yq/python yaml might handle unquoted keys/strings
-            parsed_yaml = yaml.safe_load(json_str_to_parse)
-            if isinstance(parsed_yaml, dict):
-                return parsed_yaml
-            else:
-                 # If YAML parsing results in non-dict, return empty
-                 print(f"::warning::Parsed outputs YAML was not a dictionary: {json_str_to_parse}", file=sys.stderr)
-                 return {}
-        except yaml.YAMLError as e:
-            print(f"::warning::Could not parse outputs block as JSON or YAML: {json_str_to_parse}. Error: {e}", file=sys.stderr)
-            return {} # Default to empty dict on error
-
-def parse_raw_results(raw_content: str) -> Dict[str, Dict[str, Any]]:
-    """
-    Parses the raw, potentially non-standard JSON/YAML output from act's toJSON(steps).
+    Parses the raw output using PyYAML, which is more lenient than json.loads.
     Extracts outcome and outputs for each step ID found.
 
     Args:
@@ -92,45 +22,40 @@ def parse_raw_results(raw_content: str) -> Dict[str, Dict[str, Any]]:
 
     Returns:
         A dictionary where keys are step IDs and values are dictionaries
-        containing 'outcome' and 'outputs'.
+        containing 'outcome' and 'outputs'. Returns empty dict if parsing fails.
     """
     steps_data: Dict[str, Dict[str, Any]] = {}
-    current_step_lines: List[str] = []
-    current_step_id: Optional[str] = None
-    # Regex to find step ID lines (e.g., "  step_id:") - ensure it matches start of line
-    step_id_regex = re.compile(r'^\s{2}([a-zA-Z0-9_.-]+):\s*\{?$') # Allow optional opening brace
+    try:
+        # PyYAML can often handle the quasi-YAML/JSON format from toJSON(steps)
+        parsed_data = yaml.safe_load(raw_content)
+        if not isinstance(parsed_data, dict):
+            print("::warning::Parsed results content is not a dictionary.", file=sys.stderr)
+            return {}
 
-    for line in io.StringIO(raw_content):
-        step_match = step_id_regex.match(line)
-        if step_match:
-            # Process the previous step's collected lines
-            if current_step_id and current_step_lines:
-                outcome = _extract_outcome(current_step_lines)
-                outputs = _extract_outputs_json(current_step_lines)
-                steps_data[current_step_id] = {'outcome': outcome, 'outputs': outputs}
+        for step_id, step_info in parsed_data.items():
+            if isinstance(step_info, dict):
+                outcome = str(step_info.get('outcome', 'unknown'))
+                outputs = step_info.get('outputs', {})
+                # Ensure outputs is a dictionary
+                if not isinstance(outputs, dict):
+                    print(f"::warning::Outputs for step '{step_id}' is not a dictionary, defaulting to empty.", file=sys.stderr)
+                    outputs = {}
+                steps_data[step_id] = {'outcome': outcome, 'outputs': outputs}
+            else:
+                 print(f"::warning::Step info for '{step_id}' is not a dictionary.", file=sys.stderr)
+                 steps_data[step_id] = {'outcome': 'unknown', 'outputs': {}}
 
-            # Start new step
-            current_step_id = step_match.group(1)
-            # Reset lines, DO NOT include the ID line itself in step_lines
-            current_step_lines = []
-            # Initialize entry if first time seeing this ID
-            if current_step_id not in steps_data:
-                 steps_data[current_step_id] = {'outcome': 'unknown', 'outputs': {}}
-        elif current_step_id:
-            # Continue collecting lines *within* the current step block
-            current_step_lines.append(line)
-
-    # Process the very last step's collected lines
-    if current_step_id and current_step_lines:
-        outcome = _extract_outcome(current_step_lines)
-        outputs = _extract_outputs_json(current_step_lines)
-        # Ensure entry exists even if only ID line was present
-        if current_step_id not in steps_data:
-             steps_data[current_step_id] = {'outcome': 'unknown', 'outputs': {}}
-        steps_data[current_step_id]['outcome'] = outcome
-        steps_data[current_step_id]['outputs'] = outputs
+    except yaml.YAMLError as e:
+        print(f"::warning::Failed to parse results content using PyYAML: {e}", file=sys.stderr)
+        # Fallback or return empty? Returning empty is safer.
+        return {}
+    except Exception as e:
+        # Catch other potential errors during processing
+        print(f"::error::Unexpected error during results parsing: {e}", file=sys.stderr)
+        return {}
 
     return steps_data
+
 
 def main():
     """Main execution function."""
@@ -164,7 +89,6 @@ def main():
 
     try:
         with open(merged_actions_yaml_file_path, 'r', encoding='utf-8') as f:
-            # Use safe_load to avoid potential arbitrary code execution
             merged_actions = yaml.safe_load(f)
             if not isinstance(merged_actions, list):
                 print(f"::warning::Merged actions file {merged_actions_yaml_file_path} did not contain a list.", file=sys.stderr)
@@ -173,8 +97,8 @@ def main():
         print(f"::warning::Merged actions YAML file not found or invalid at {merged_actions_yaml_file_path}: {e}", file=sys.stderr)
         merged_actions = [] # Continue with empty actions list
 
-    # --- Parse Raw Results ---
-    parsed_steps_data = parse_raw_results(raw_results_content)
+    # --- Parse Raw Results using PyYAML ---
+    parsed_steps_data = parse_raw_results_with_yaml(raw_results_content)
 
     # --- Combine Data ---
     final_results = []
@@ -219,7 +143,7 @@ def main():
 
 
         final_results.append({
-            "id": step_id,
+            # "id": step_id, # Removed as requested
             "name": name,
             "uses": uses,
             "run": run_script, # Add the run field
