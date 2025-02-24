@@ -25,7 +25,8 @@ jobs:
         id: super_run
         # Use the pre-built Docker image from GHCR
         # Replace ':main' with ':latest' or a specific version tag if needed
-        uses: docker://ghcr.io/resoft-labs/super-action:main
+        # uses: docker://ghcr.io/resoft-labs/super-action:main
+        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
         with:
           # Define presets to run
           presets: |
