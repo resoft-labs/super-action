@@ -2,14 +2,42 @@
 
 This **Docker-based** action allows you to define a sequence of other GitHub Actions to run via a JSON input and executes them using `nektos/act` inside its container, collecting their results.
 
-**Author:** ReSoft Labs <info@resoftlabs.com>
+**Author:** Faruk Diblen - ReSoft Labs <info@resoftlabs.com>
 **Repository:** [https://github.com/resoft-labs/super-action](https://github.com/resoft-labs/super-action)
 
 ## Description
 
-The primary goal of this action is to execute a series of specified actions, defined in a JSON array and passed as an input. It dynamically generates a temporary workflow file and runs it using `nektos/act` within its Docker container. It then provides the outcome (success/failure) and outputs of each executed action step (as captured by `act`'s simulation) as a JSON object.
+`super-action` allows you to dynamically define and execute a sequence of GitHub Actions steps within a single job step. You provide a list of actions (using `uses`) or commands (using `run`) via inputs, and `super-action` runs them sequentially using `nektos/act` inside its isolated Docker container environment. It then collects the results (outcome and outputs) of each executed step.
 
-**This approach overcomes the limitation of composite actions by simulating a workflow run inside the action's container.**
+This provides a way to create reusable, parameterized sequences of actions that can be invoked dynamically, offering more flexibility than standard GitHub Actions features like Composite Actions in certain scenarios.
+
+## Use Cases
+
+`super-action` can be beneficial when:
+
+-   **Dynamic Step Generation:** You need to run a different set of actions or commands based on runtime conditions (e.g., file changes, API responses, previous step outputs) that cannot be easily determined using standard workflow `if` conditions on steps. You can generate the `action_list` input dynamically in a prior step.
+-   **Complex Reusable Logic:** You have a complex sequence of setup, build, test, or deployment steps involving multiple existing actions that you want to encapsulate into a single, reusable unit with parameters, potentially exceeding the limitations of Composite Actions.
+-   **Simulating Workflows:** You want to test or simulate parts of a workflow locally or within another workflow using `nektos/act`.
+-   **Action Orchestration:** You need finer-grained control over a sequence of actions than standard job dependencies allow, potentially running them within a specific container environment provided by `super-action`.
+
+## Comparison with Composite Actions
+
+| Feature                 | Super-Action                                     | Composite Action                                  |
+| :---------------------- | :----------------------------------------------- | :------------------------------------------------ |
+| **Execution Context**   | Runs steps inside its own Docker container via `act` | Runs steps directly on the runner machine         |
+| **Step Definition**     | Dynamic (via `presets` / `action_list` inputs)   | Static (defined in `action.yml` of composite)     |
+| **Action Types Allowed**| Can run *any* other action (Docker, JS, Composite) | Can only run `run` scripts and `uses` JS actions |
+| **Environment**         | Isolated Docker environment                      | Runner's environment                              |
+| **Performance**         | Slower (Docker startup + `act` overhead)         | Faster (direct execution)                         |
+| **Complexity**          | Higher (requires `act`, Docker)                  | Lower (native feature)                            |
+| **Use Case**            | Dynamic execution, running Docker actions        | Reusable sequences of `run` and JS actions        |
+
+**Key Differences:**
+
+-   **Flexibility vs. Simplicity:** `super-action` offers more flexibility by allowing dynamic step definition and running any action type (including Docker actions) but introduces complexity and performance overhead. Composite actions are simpler and faster but are limited to static definitions and cannot directly run Docker actions.
+-   **Environment:** `super-action` provides an isolated environment, while composite actions share the runner's environment.
+
+Choose `super-action` when you need the dynamic execution capabilities or the ability to run Docker-based actions within your sequence. Choose Composite Actions for simpler, faster execution of reusable `run` scripts and JavaScript actions.
 
 ## Inputs
 
@@ -77,8 +105,9 @@ The primary goal of this action is to execute a series of specified actions, def
 
 -   **Docker Action**: This action runs inside a Docker container defined by the `Dockerfile`. The runner executing this action must have Docker installed and configured to run containers. Standard GitHub-hosted runners support Docker actions.
 -   **nektos/act**: The core execution is handled by `nektos/act` within the container. `act` simulates the GitHub Actions runner environment.
--   **yq**: The `entrypoint.sh` script uses `yq` (from mikefarah) to parse the `action_list` input. It's included in the Docker image.
--   **Docker-in-Docker**: `act` often requires Docker itself to run action steps that use Docker (e.g., building images, service containers). The Dockerfile installs `docker.io`, but running Docker-in-Docker can have security implications and might require privileged mode on self-hosted runners.
+-   **Python 3 & PyYAML**: The `entrypoint.py` script uses Python and the PyYAML library for input parsing and workflow generation. These are included in the Docker image.
+-   **yq & jq**: These tools are included in the Docker image for YAML/JSON processing within scripts if needed (though the core logic now uses Python).
+-   **Docker-in-Docker**: `act` often requires Docker itself to run action steps that use Docker (e.g., building images, service containers). The Dockerfile installs `docker.io`, but running Docker-in-Docker can have security implications and might require privileged mode on self-hosted runners. The `super-action` container itself needs access to the host's Docker socket (`/var/run/docker.sock`) for `act` to function correctly.
 
 ## Available Presets
 
@@ -176,15 +205,15 @@ You can test this action locally using `nektos/act` if you have Docker and `act`
     *   Ensure you are running the command from the root directory of the `super-action` project.
     *   If `act push -W ... -l` doesn't list the expected job, there might be an issue with how `act` is parsing the workflow file or detecting the event trigger. Double-check the workflow syntax and consult `act`'s documentation or issue tracker.
     *   If the job is listed, running `act push -W <workflow_file> -j <job_id>` should execute the job.
-    *   When it reaches the `uses: ./` step, it will execute your local `super-action` using the Docker container.
-    *   The `entrypoint.sh` script will run inside the container, using the `presets` and `action_list` defined in the workflow file as input.
-    *   You will see the output from `act`, including the logs from the dynamically executed actions and the automatically logged "Super-Action Collected Results (JSON)" group at the end of the `super-action` step.
+    *   When it reaches the `uses: ./` or `uses: owner/repo@ref` step pointing to this action, it will execute your local `super-action` by building its `Dockerfile`. If using `uses: docker://...`, it will pull the pre-built image.
+    *   The `entrypoint.py` script will run inside the container, using the `presets` and `action_list` defined in the workflow file as input.
+    *   You will see the output from `act` simulating the dynamic workflow, including the logs from the executed steps and the automatically logged "Super-Action Collected Results (JSON)" group at the end (if enabled).
 
 ## Considerations & Potential Issues
 
 -   **Performance**: Running actions via `act` inside a Docker container introduces overhead compared to running them directly on the runner. This includes container startup time and `act`'s simulation time.
 -   **Compatibility**: `act` aims to simulate the GitHub Actions environment but might have differences or limitations compared to the actual runners, especially with complex workflows, matrix strategies, or specific runner features.
--   **Secrets**: Passing secrets securely to actions run via `act` requires careful handling. The current `entrypoint.sh` does not explicitly manage secrets passed to `act`. You might need to mount a secret file (`--secret-file`) if the dynamic actions require them.
+-   **Secrets**: Passing secrets securely to actions run via `act` requires careful handling. The current `entrypoint.py` does not explicitly manage secrets passed to `act`. You might need to use `act`'s `--secret` or `--secret-file` flags if the dynamic actions require them, which would require modifying the `subprocess` call in `entrypoint.py`.
 -   **Resource Usage**: Running `act` and potentially Docker-in-Docker can consume significant resources (CPU, memory, disk space) on the runner.
 -   **Network**: Network access from within the `act` simulation might differ from the main runner environment.
--   **Artifacts/Caching**: Handling artifacts and caching between the main workflow and the `act`-executed workflow requires explicit volume mounts or other strategies within the `entrypoint.sh` if needed. The current script uses `--bind` to mount the workspace.
+-   **Artifacts/Caching**: Handling artifacts and caching between the main workflow and the `act`-executed workflow is not directly supported. `act` runs in an isolated manner. Steps within the dynamic workflow can use standard caching actions (like `actions/cache`), but this cache is separate from the main workflow's cache. Artifacts produced inside the `act` run are not automatically available outside unless written to the mounted workspace (`--bind` is used by default).
