@@ -1,0 +1,6 @@
+[
+    {
+        "name": "Configure Git User",
+        "run": "git config --global user.email \"action@github.com\"\ngit config --global user.name \"GitHub Action\""
+    }
+]

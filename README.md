@@ -140,6 +140,9 @@ The following presets are currently included:
 -   `setup-node-20`: Runs `actions/setup-node@v4` with `node-version: '20'`. (Defined in `presets/setup-node-20.json`)
 -   `setup-node-lts`: Runs `actions/setup-node@v4` with `node-version: 'lts/*'`. (Defined in `presets/setup-node-lts.json`)
 -   `node-setup-install`: Multi-step preset for checkout, Node.js LTS setup (with npm cache), and `npm ci`. (Defined in `presets/node-setup-install.json`)
+-   `git-config-user`: Configures git user email and name to default values. (Defined in `presets/git-config-user.json`)
+-   `setup-python-lts`: Sets up the latest Python 3 LTS version using `actions/setup-python@v5` with pip cache enabled. (Defined in `presets/setup-python-lts.json`)
+-   `setup-python-3.12`: Sets up Python 3.12 using `actions/setup-python@v5` with pip cache enabled. (Defined in `presets/setup-python-3.12.json`)
 
 ## Usage Examples
 
