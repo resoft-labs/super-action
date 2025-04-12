@@ -1,0 +1,56 @@
+name: all Presets
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run_all_presets:
+    runs-on: ubuntu-latest
+    steps:
+      # No explicit checkout needed here as the 'checkout' preset handles it
+
+      - name: Run Multiple Presets with super-action
+        id: super_run
+        # Use the pre-built Docker image from GHCR for efficiency
+        uses: docker://ghcr.io/resoft-labs/super-action:main
+        with:
+          # Define presets to run in order (as a YAML block scalar string)
+          presets: |
+            - checkout
+            - git-config-user
+            - setup-node-lts
+            - setup-python-lts
+            # - node-setup-install
+
+          # Add a custom step to verify setups
+          action_list: |
+            - name: Verify Environment
+              run: |
+                echo "Verifying environment setup by presets..."
+                echo "Node version: $(node --version)"
+                echo "NPM version: $(npm --version)"
+                echo "Python version: $(python --version)"
+                echo "Git user name: $(git config --global user.name)"
+                echo "Git user email: $(git config --global user.email)"
+
+          # Optionally save results
+          results_output_file: outputs/all_presets_results.json
+          display_results: true
+
+      # Example: Accessing results (optional)
+      - name: Show Preset Results Summary
+        if: always()
+        run: |
+          echo "Super-action results summary:"
+          echo '${{ steps.super_run.outputs.results }}' | jq -c '.[] | {name: .name, outcome: .outcome}'
+
+      # Optionally upload artifact if results_output_file was used
+      - name: Upload All Presets Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-presets-results
+          path: outputs/all_presets_results.json
+          if-no-files-found: warn
