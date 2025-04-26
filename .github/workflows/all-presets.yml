@@ -14,7 +14,8 @@ jobs:
       - name: Run Multiple Presets with super-action
         id: super_run
         # Use the pre-built Docker image from GHCR for efficiency
-        uses: docker://ghcr.io/resoft-labs/super-action:main
+        # uses: docker://ghcr.io/resoft-labs/super-action:main
+        uses: resoft-labs/super-action@main # resoft-labs/super-action@v1
         with:
           # Define presets to run in order (as a YAML block scalar string)
           presets: |
