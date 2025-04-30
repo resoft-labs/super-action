@@ -11,6 +11,9 @@ jobs:
     steps:
       # No explicit checkout needed here as the 'checkout' preset handles it
 
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Run Multiple Presets with super-action
         id: super_run
         # Use the pre-built Docker image from GHCR for efficiency
