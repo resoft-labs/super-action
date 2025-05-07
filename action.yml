@@ -1,4 +1,4 @@
-name: superaction
+name: resoftlabs-super-action
 description: 'Runs a sequence of specified GitHub Actions with their parameters and collects their results.'
 author: 'Faruk Diblen - ReSoft Labs <info@resoftlabs.com>'
 
