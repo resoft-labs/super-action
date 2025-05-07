@@ -2,8 +2,6 @@
 
 This **Docker-based** action allows you to define a sequence of other GitHub Actions to run via a JSON input and executes them inside its container, collecting their results.
 
-**Repository:** [https://github.com/resoft-labs/super-action](https://github.com/resoft-labs/super-action)
-
 ## Description
 
 `super-action` allows you to dynamically define and execute a sequence of GitHub Actions steps within a single job step. You provide a list of actions (using `uses`) or commands (using `run`) via inputs, and `super-action` runs them sequentially inside its isolated Docker container environment. It then collects the results (outcome and outputs) of each executed step.
